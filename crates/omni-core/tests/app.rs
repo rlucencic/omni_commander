@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use omni_core::app::{self, AppConfig, AppHandle, Command, PaneConfig, PaneId, Update};
+use omni_core::app::{self, AppConfig, AppHandle, Command, PaneId, PaneSetup, TabSetup, Update};
 use omni_core::pane::SelectionChange;
 use omni_core::{Listing, Row, SortKey, SortSpec};
 use omni_vfs::{
@@ -24,17 +24,7 @@ struct Harness {
 }
 
 fn start(fs: Arc<dyn FileSystem>, left: &Path, right: &Path) -> Harness {
-    let config = AppConfig {
-        left: PaneConfig {
-            fs: Arc::clone(&fs),
-            path: left.to_path_buf(),
-        },
-        right: PaneConfig {
-            fs,
-            path: right.to_path_buf(),
-        },
-        sort: SortSpec::default(),
-    };
+    let config = AppConfig::new(fs, left.to_path_buf(), right.to_path_buf());
     let (handle, updates, task) = app::spawn(&tokio::runtime::Handle::current(), config);
     Harness {
         handle,
@@ -91,6 +81,17 @@ impl Harness {
                     }
                 }
                 _ => {}
+            }
+        }
+    }
+
+    /// Waits for a completed listing of `pane` showing `path`, skipping
+    /// listings of other locations (e.g. a background refresh finishing).
+    async fn listing_at(&mut self, pane: PaneId, path: &Path) -> ListingUpdate {
+        loop {
+            let listing = self.listing(pane).await;
+            if listing.location == path {
+                return listing;
             }
         }
     }
@@ -327,7 +328,7 @@ async fn tabs_open_switch_and_close() {
         pane: PaneId::Left,
         path: dir.path().join("a"),
     });
-    assert_eq!(h.listing(PaneId::Left).await.location, dir.path().join("a"));
+    h.listing_at(PaneId::Left, &dir.path().join("a")).await;
     h.expect_tabs(PaneId::Left, (titles(&[&root, "a"]), 1))
         .await;
 
@@ -335,8 +336,7 @@ async fn tabs_open_switch_and_close() {
         pane: PaneId::Left,
         index: 0,
     });
-    let first = h.listing(PaneId::Left).await;
-    assert_eq!(first.location, dir.path());
+    let first = h.listing_at(PaneId::Left, dir.path()).await;
     h.expect_tabs(PaneId::Left, (titles(&[&root, "a"]), 0))
         .await;
 
@@ -354,7 +354,7 @@ async fn tabs_open_switch_and_close() {
         pane: PaneId::Left,
         forward: true,
     });
-    assert_eq!(h.listing(PaneId::Left).await.location, dir.path().join("b"));
+    h.listing_at(PaneId::Left, &dir.path().join("b")).await;
     h.expect_tabs(PaneId::Left, (titles(&[&root, "b", "a"]), 1))
         .await;
 
@@ -363,7 +363,7 @@ async fn tabs_open_switch_and_close() {
         pane: PaneId::Left,
         index: None,
     });
-    assert_eq!(h.listing(PaneId::Left).await.location, dir.path().join("a"));
+    h.listing_at(PaneId::Left, &dir.path().join("a")).await;
     h.expect_tabs(PaneId::Left, (titles(&[&root, "a"]), 1))
         .await;
 
@@ -387,6 +387,87 @@ async fn tabs_open_switch_and_close() {
             _ => {}
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restores_a_session_and_snapshots_it() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("a")).unwrap();
+    std::fs::create_dir(dir.path().join("b")).unwrap();
+    std::fs::write(dir.path().join("x"), b"x").unwrap();
+    std::fs::write(dir.path().join(".hidden"), b"").unwrap();
+    let root = dir
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let by_size = SortSpec {
+        key: SortKey::Size,
+        descending: true,
+    };
+
+    let config = AppConfig {
+        fs: Arc::new(LocalFs),
+        left: PaneSetup {
+            tabs: vec![
+                TabSetup {
+                    path: dir.path().join("a"),
+                    sort: SortSpec::default(),
+                },
+                TabSetup {
+                    path: dir.path().to_path_buf(),
+                    sort: by_size,
+                },
+            ],
+            active_tab: 1,
+        },
+        right: PaneSetup::single(dir.path().join("b"), SortSpec::default()),
+        active: PaneId::Right,
+        show_hidden: false,
+    };
+    let (handle, updates, task) = app::spawn(&tokio::runtime::Handle::current(), config);
+    let mut h = Harness {
+        handle,
+        updates,
+        task,
+        tabs: HashMap::new(),
+    };
+
+    assert!(matches!(h.next().await, Update::ActivePane(PaneId::Right)));
+    let left = h.listing(PaneId::Left).await;
+    assert_eq!(left.location, dir.path());
+    assert_eq!(left.listing.sort(), by_size);
+    assert_eq!(
+        left.listing.entry_count(),
+        3,
+        "the hidden file is not shown"
+    );
+    h.expect_tabs(PaneId::Left, (vec!["a".to_string(), root.clone()], 1))
+        .await;
+
+    h.handle.send(Command::ToggleHidden);
+    assert_eq!(h.listing(PaneId::Left).await.listing.entry_count(), 4);
+
+    let (reply, snapshot) = tokio::sync::oneshot::channel();
+    h.handle.send(Command::Snapshot(reply));
+    let snapshot = snapshot.await.unwrap();
+    assert_eq!(snapshot.active, PaneId::Right);
+    assert!(snapshot.show_hidden);
+    assert_eq!(snapshot.left.active_tab, 1);
+    assert_eq!(snapshot.left.tabs[0].path, dir.path().join("a"));
+    assert_eq!(snapshot.left.tabs[1].sort, by_size);
+    assert_eq!(
+        snapshot.right,
+        PaneSetup::single(dir.path().join("b"), SortSpec::default())
+    );
+
+    // The restored background tab loads when it is first shown.
+    h.handle.send(Command::SelectTab {
+        pane: PaneId::Left,
+        index: 0,
+    });
+    assert_eq!(h.listing(PaneId::Left).await.location, dir.path().join("a"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

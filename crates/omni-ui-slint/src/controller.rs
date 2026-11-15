@@ -333,6 +333,7 @@ impl Controller {
             }),
             Action::Refresh => self.app.send(Command::Refresh { pane }),
             Action::SortBy(key) => self.app.send(Command::SortBy { pane, key }),
+            Action::ToggleHidden => self.app.send(Command::ToggleHidden),
         }
     }
 
@@ -416,13 +417,14 @@ fn move_cursor(window: &AppWindow, pane: i32, motion: Motion) {
     }
 }
 
-/// `3 folders, 12 files, 1.2 MiB`, plus how many entries a filter hides.
+/// `3 folders, 12 files, 1.2 MiB`, plus how many entries are not shown
+/// (because of the quick filter or hidden files being hidden).
 fn listing_summary(listing: &Listing) -> String {
     let mut summary = format_totals(&listing.totals());
     let (shown, total) = (listing.entry_count(), listing.entries().len());
     if shown < total {
         summary.push_str(&format!(
-            "   (filter: {} of {} shown)",
+            "   ({} of {} shown)",
             format_count(shown),
             format_count(total)
         ));

@@ -26,6 +26,20 @@ export component AppWindow inherits Window {
     in property <PaneInfo> right-info;
     /// 0 = left, 1 = right.
     in property <int> active-pane: 0;
+    /// 0 = follow the system, 1 = light, 2 = dark.
+    in property <int> theme: 0;
+
+    init => {
+        root.apply-theme();
+    }
+    changed theme => {
+        root.apply-theme();
+    }
+
+    function apply-theme() {
+        // `unknown` makes the style follow the system setting again.
+        Palette.color-scheme = root.theme == 1 ? ColorScheme.light : (root.theme == 2 ? ColorScheme.dark : ColorScheme.unknown);
+    }
     out property <int> left-cursor: left.current-row;
     out property <int> right-cursor: right.current-row;
 
@@ -207,7 +221,7 @@ export component AppWindow inherits Window {
             }
 
             Text {
-                text: "Ins/Space select   Shift+↑↓ range   Ctrl+A all   type to filter   Ctrl+T/W tabs   Ctrl+Tab next tab   Alt+←/→ back/forward   Ctrl+L path   Tab pane   Ctrl+R refresh";
+                text: "Ins/Space select   Shift+↑↓ range   Ctrl+A all   type to filter   Ctrl+H hidden   Ctrl+T/W tabs   Ctrl+Tab next tab   Alt+←/→ back/forward   Ctrl+L path   Tab pane";
                 font-size: 11px;
                 color: Palette.foreground;
                 opacity: 0.6;

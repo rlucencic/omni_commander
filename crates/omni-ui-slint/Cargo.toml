@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+omni-config.workspace = true
 omni-core.workspace = true
 omni-vfs.workspace = true
 slint.workspace = true

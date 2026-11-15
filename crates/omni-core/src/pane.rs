@@ -210,6 +210,8 @@ pub struct PaneState {
     /// What is shown: `full`, or `full` narrowed by `filter`.
     listing: Arc<Listing>,
     filter: Option<Filter>,
+    /// Whether entries with the hidden attribute are shown.
+    show_hidden: bool,
     /// Indexed by entry index, so it applies to `full` and `listing` alike.
     selection: Arc<Selection>,
     range: Option<RangeSelect>,
@@ -235,6 +237,7 @@ impl PaneState {
             full: Arc::clone(&empty),
             listing: empty,
             filter: None,
+            show_hidden: true,
             selection: Arc::new(Selection::new(0)),
             range: None,
             sort,
@@ -260,6 +263,7 @@ impl PaneState {
             full: Arc::clone(&self.full),
             listing: Arc::clone(&self.full),
             filter: None,
+            show_hidden: self.show_hidden,
             selection: Arc::new(Selection::new(self.full.entries().len())),
             range: None,
             sort: self.sort,
@@ -271,8 +275,32 @@ impl PaneState {
             back: Vec::new(),
             forward: Vec::new(),
         };
+        pane.listing = pane.apply_filter();
         let changes = pane.refresh();
         (pane, changes)
+    }
+
+    /// Sets whether hidden entries are shown, for a pane that has not shown
+    /// anything yet (use [`Self::set_show_hidden`] afterwards).
+    pub fn with_show_hidden(mut self, show: bool) -> Self {
+        self.show_hidden = show;
+        self.listing = self.apply_filter();
+        self
+    }
+
+    /// Shows or hides entries with the hidden attribute. Hidden entries are
+    /// deselected, like entries the quick filter hides.
+    pub fn set_show_hidden(&mut self, show: bool) -> Changes {
+        if show == self.show_hidden {
+            return Changes::default();
+        }
+        self.show_hidden = show;
+        self.refilter()
+    }
+
+    /// Shows `message` in the pane's message line.
+    pub fn notify(&mut self, level: Level, text: String) -> Changes {
+        self.set_message(level, text)
     }
 
     pub fn fs(&self) -> &Arc<dyn FileSystem> {
@@ -466,6 +494,11 @@ impl PaneState {
             return Changes::default();
         }
         self.filter = filter;
+        self.refilter()
+    }
+
+    /// Re-applies the filter and hidden-entry setting to the full listing.
+    fn refilter(&mut self) -> Changes {
         self.listing = self.apply_filter();
         self.deselect_hidden();
         self.range = None;
@@ -580,8 +613,14 @@ impl PaneState {
             DirEvent::Done => {
                 let load = self.load.take().expect("load checked above");
                 self.settled = true;
-                self.message = summarize_warnings(&load.warnings);
-                self.show(load.path, load.focus, load.history, load.entries)
+                let warnings = summarize_warnings(&load.warnings);
+                let changes = self.show(load.path, load.focus, load.history, load.entries);
+                // Keep an existing message (e.g. one shown while this load
+                // ran) unless the load has warnings of its own.
+                if warnings.is_some() {
+                    self.message = warnings;
+                }
+                changes
             }
             DirEvent::Failed(err) => {
                 let load = self.load.take().expect("load checked above");
@@ -691,6 +730,10 @@ impl PaneState {
         if let Some(focus) = focus {
             self.record_history(&path, history);
             self.focus = focus;
+            // Messages are about the place being left.
+            if path != self.location {
+                self.message = None;
+            }
         }
         let has_parent = path.parent().is_some();
         self.replace_listing(path, Listing::new(entries, self.sort, has_parent));
@@ -719,16 +762,22 @@ impl PaneState {
         self.range = None;
     }
 
+    /// The shown listing: `full` narrowed by the filter and the hidden-entry
+    /// setting.
     fn apply_filter(&self) -> Arc<Listing> {
-        match &self.filter {
-            Some(filter) => Arc::new(self.full.filtered(filter)),
-            None => Arc::clone(&self.full),
+        if self.filter.is_none() && self.show_hidden {
+            return Arc::clone(&self.full);
         }
+        let (filter, show_hidden) = (self.filter.as_ref(), self.show_hidden);
+        Arc::new(self.full.filtered(|entry| {
+            (show_hidden || !entry.attributes.hidden)
+                && filter.is_none_or(|f| f.matches(&entry.name))
+        }))
     }
 
-    /// Deselects entries the filter hides.
+    /// Deselects entries the filter or the hidden-entry setting hides.
     fn deselect_hidden(&mut self) {
-        if self.filter.is_none() || self.selection.is_empty() {
+        if (self.filter.is_none() && self.show_hidden) || self.selection.is_empty() {
             return;
         }
         let mut visible = Selection::new(self.full.entries().len());
@@ -1502,5 +1551,76 @@ mod tests {
         assert_eq!(pane.directory_at(id, 2), None, "files are not directories");
         let (root_pane, _) = PaneState::new(Arc::new(UnusedFs), root(), SortSpec::default());
         assert_eq!(root_pane.title(), root().display().to_string());
+    }
+
+    fn hidden(name: &str) -> Entry {
+        let mut entry = file(name);
+        entry.attributes.hidden = true;
+        entry
+    }
+
+    #[test]
+    fn hidden_entries_can_be_hidden_and_shown_again() {
+        let mut pane = loaded_pane(vec![file("a"), hidden(".b"), file("c")]);
+        let _ = pane.select_all();
+        pane.cursor_moved(pane.listing().id(), 2); // ".b"
+        let changes = pane.set_show_hidden(false);
+        assert_eq!(pane.listing().entry_count(), 2);
+        assert_eq!(
+            selected_names(&pane),
+            ["a", "c"],
+            "hidden entries are deselected"
+        );
+        assert_eq!(
+            row_name(&pane, changes.listing.unwrap()),
+            "a",
+            "cursor moves off the hidden entry"
+        );
+        assert_eq!(pane.set_show_hidden(false), Changes::default());
+
+        // Combined with a quick filter; refreshes keep both.
+        let _ = pane.set_filter("*");
+        let changes = pane.refresh();
+        let _ = arrive(
+            &mut pane,
+            changes,
+            vec![file("a"), hidden(".b"), hidden(".z"), file("c")],
+        );
+        assert_eq!(pane.listing().entry_count(), 2);
+        let _ = pane.set_show_hidden(true);
+        assert_eq!(pane.listing().entry_count(), 4);
+    }
+
+    #[test]
+    fn new_panes_can_start_with_hidden_entries_hidden() {
+        let path = home();
+        let (pane, changes) = PaneState::new(Arc::new(UnusedFs), path, SortSpec::default());
+        let mut pane = pane.with_show_hidden(false);
+        let _ = arrive(&mut pane, changes, vec![hidden(".x"), file("y")]);
+        assert_eq!(pane.listing().entry_count(), 1);
+        let (copy, _) = pane.duplicate();
+        assert_eq!(
+            copy.listing().entry_count(),
+            1,
+            "duplicates keep the setting"
+        );
+    }
+
+    #[test]
+    fn messages_survive_loading_the_same_place_but_not_leaving_it() {
+        let path = home();
+        let (mut pane, changes) = PaneState::new(Arc::new(UnusedFs), path, SortSpec::default());
+        // A message arrives while the first listing is still loading.
+        let _ = pane.notify(Level::Warning, "settings: something".into());
+        let _ = arrive(&mut pane, changes, vec![file("a")]);
+        assert_eq!(pane.status().message.unwrap().text, "settings: something");
+
+        let changes = pane.refresh();
+        let _ = arrive(&mut pane, changes, vec![file("a")]);
+        assert!(pane.status().message.is_some(), "a refresh keeps it");
+
+        let changes = pane.navigate(home().join("x"));
+        let _ = arrive(&mut pane, changes, vec![]);
+        assert_eq!(pane.status().message, None, "leaving clears it");
     }
 }

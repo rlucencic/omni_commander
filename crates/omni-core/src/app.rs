@@ -21,11 +21,11 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use omni_vfs::{DirEvent, FileSystem};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::listing::{Listing, SnapshotId};
-use crate::pane::{Changes, LoadRequest, LoadToken, PaneState, PaneStatus, SelectionChange};
+use crate::pane::{Changes, Level, LoadRequest, LoadToken, PaneState, PaneStatus, SelectionChange};
 use crate::selection::Selection;
 use crate::sort::{SortKey, SortSpec};
 
@@ -63,7 +63,7 @@ impl PaneId {
 /// A request from the front end. Commands that refer to a row carry the
 /// [`SnapshotId`] of the listing the row was taken from. Commands addressed
 /// to a pane act on its active tab.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum Command {
     /// Enter the directory at `row`, or go up for the `..` row.
     Open {
@@ -156,6 +156,16 @@ pub enum Command {
         pane: PaneId,
         forward: bool,
     },
+    /// Show or hide entries with the hidden attribute, in every tab.
+    ToggleHidden,
+    /// Show a message in the pane's message line.
+    ShowMessage {
+        pane: PaneId,
+        level: Level,
+        text: String,
+    },
+    /// Reply with what is open, e.g. to save the session on exit.
+    Snapshot(oneshot::Sender<SessionSnapshot>),
     /// Make `pane` the active pane.
     Activate(PaneId),
     /// Make the other pane active.
@@ -196,18 +206,60 @@ pub enum Update {
     ActivePane(PaneId),
 }
 
-/// Initial state of a pane.
-#[derive(Debug, Clone)]
-pub struct PaneConfig {
-    pub fs: Arc<dyn FileSystem>,
+/// A tab: where it is and how it is sorted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TabSetup {
     pub path: PathBuf,
+    pub sort: SortSpec,
 }
 
+/// The tabs of a pane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneSetup {
+    /// Never empty.
+    pub tabs: Vec<TabSetup>,
+    pub active_tab: usize,
+}
+
+impl PaneSetup {
+    pub fn single(path: PathBuf, sort: SortSpec) -> Self {
+        Self {
+            tabs: vec![TabSetup { path, sort }],
+            active_tab: 0,
+        }
+    }
+}
+
+/// What the core starts with.
 #[derive(Debug, Clone)]
 pub struct AppConfig {
-    pub left: PaneConfig,
-    pub right: PaneConfig,
-    pub sort: SortSpec,
+    pub fs: Arc<dyn FileSystem>,
+    pub left: PaneSetup,
+    pub right: PaneSetup,
+    pub active: PaneId,
+    pub show_hidden: bool,
+}
+
+impl AppConfig {
+    /// One tab per pane, sorted by name, hidden entries shown.
+    pub fn new(fs: Arc<dyn FileSystem>, left: PathBuf, right: PathBuf) -> Self {
+        Self {
+            fs,
+            left: PaneSetup::single(left, SortSpec::default()),
+            right: PaneSetup::single(right, SortSpec::default()),
+            active: PaneId::Left,
+            show_hidden: true,
+        }
+    }
+}
+
+/// What is open, in the same shape as the configuration it can restore.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionSnapshot {
+    pub left: PaneSetup,
+    pub right: PaneSetup,
+    pub active: PaneId,
+    pub show_hidden: bool,
 }
 
 /// Sends commands to the running core. Cheap to clone; never blocks.
@@ -231,10 +283,18 @@ impl AppHandle {
 /// Returns the command handle, the receiver of updates, and the actor's task.
 /// The actor stops when every [`AppHandle`] is dropped or the update receiver
 /// is closed.
+///
+/// # Panics
+///
+/// If a pane in `config` has no tabs.
 pub fn spawn(
     runtime: &tokio::runtime::Handle,
     config: AppConfig,
 ) -> (AppHandle, mpsc::Receiver<Update>, JoinHandle<()>) {
+    assert!(
+        !config.left.tabs.is_empty() && !config.right.tabs.is_empty(),
+        "every pane needs at least one tab"
+    );
     let (command_tx, command_rx) = mpsc::unbounded_channel();
     let (update_tx, update_rx) = mpsc::channel(UPDATE_CAPACITY);
     let task = runtime.spawn(run(config, command_rx, update_tx));
@@ -269,6 +329,9 @@ struct Tab {
     /// Task forwarding the tab's current enumeration. Replacing or dropping
     /// it aborts the task, which drops the stream and cancels the provider.
     loader: Option<JoinHandle<()>>,
+    /// A restored background tab's first load, started when it is first
+    /// activated rather than all at once on startup.
+    deferred: Option<LoadRequest>,
 }
 
 impl Drop for Tab {
@@ -295,6 +358,7 @@ impl Side {
 struct Core {
     sides: [Side; 2],
     active: PaneId,
+    show_hidden: bool,
     next_tab: u64,
     updates: mpsc::Sender<Update>,
     dir_events: mpsc::Sender<TabDirEvent>,
@@ -306,29 +370,26 @@ async fn run(
     updates: mpsc::Sender<Update>,
 ) {
     let (dir_event_tx, mut dir_events) = mpsc::channel(DIR_EVENT_CAPACITY);
-    let (left, left_changes) = PaneState::new(config.left.fs, config.left.path, config.sort);
-    let (right, right_changes) = PaneState::new(config.right.fs, config.right.path, config.sort);
-    let side = |id: u64, state: PaneState| Side {
-        tabs: vec![Tab {
-            id: TabId(id),
-            state,
-            loader: None,
-        }],
-        active: 0,
-        published_tabs: None,
-    };
+    let mut next_tab = 0;
+    let (left, left_changes) =
+        open_side(config.left, &config.fs, config.show_hidden, &mut next_tab);
+    let (right, right_changes) =
+        open_side(config.right, &config.fs, config.show_hidden, &mut next_tab);
+    let (left_active, right_active) = (left.active, right.active);
     let mut core = Core {
-        sides: [side(0, left), side(1, right)],
-        active: PaneId::Left,
-        next_tab: 2,
+        sides: [left, right],
+        active: config.active,
+        show_hidden: config.show_hidden,
+        next_tab,
         updates,
         dir_events: dir_event_tx,
     };
 
     let started = async {
         core.send(Update::ActivePane(core.active)).await?;
-        core.apply(PaneId::Left, 0, left_changes).await?;
-        core.apply(PaneId::Right, 0, right_changes).await?;
+        core.apply(PaneId::Left, left_active, left_changes).await?;
+        core.apply(PaneId::Right, right_active, right_changes)
+            .await?;
         core.publish_tabs(PaneId::Left).await?;
         core.publish_tabs(PaneId::Right).await
     };
@@ -352,6 +413,46 @@ async fn run(
     // Dropping the tabs aborts their loaders.
     drop(core);
     tracing::debug!("application core stopped");
+}
+
+/// Creates the tabs of a pane. Only the active tab starts loading; the
+/// others keep their first load for when they are activated. Returns the
+/// side and the active tab's changes.
+fn open_side(
+    setup: PaneSetup,
+    fs: &Arc<dyn FileSystem>,
+    show_hidden: bool,
+    next_tab: &mut u64,
+) -> (Side, Changes) {
+    let active = setup.active_tab.min(setup.tabs.len() - 1);
+    let mut active_changes = Changes::default();
+    let tabs = setup
+        .tabs
+        .into_iter()
+        .enumerate()
+        .map(|(index, tab)| {
+            let (state, changes) = PaneState::new(Arc::clone(fs), tab.path, tab.sort);
+            let mut deferred = None;
+            if index == active {
+                active_changes = changes;
+            } else {
+                deferred = changes.load;
+            }
+            *next_tab += 1;
+            Tab {
+                id: TabId(*next_tab),
+                state: state.with_show_hidden(show_hidden),
+                loader: None,
+                deferred,
+            }
+        })
+        .collect();
+    let side = Side {
+        tabs,
+        active,
+        published_tabs: None,
+    };
+    (side, active_changes)
 }
 
 impl Core {
@@ -424,6 +525,7 @@ impl Core {
                 let current = side.active();
                 let (state, changes) =
                     PaneState::new(Arc::clone(current.fs()), path, current.sort());
+                let state = state.with_show_hidden(self.show_hidden);
                 self.insert_tab(pane, state, changes, !background).await
             }
             Command::CloseTab { pane, index } => self.close_tab(pane, index).await,
@@ -437,6 +539,43 @@ impl Core {
                     (side.active + count - 1) % count
                 };
                 self.select_tab(pane, index).await
+            }
+            Command::ToggleHidden => {
+                self.show_hidden = !self.show_hidden;
+                for pane in PaneId::ALL {
+                    for index in 0..self.sides[pane.index()].tabs.len() {
+                        let changes = self.sides[pane.index()].tabs[index]
+                            .state
+                            .set_show_hidden(self.show_hidden);
+                        self.apply(pane, index, changes).await?;
+                    }
+                }
+                Ok(())
+            }
+            Command::ShowMessage { pane, level, text } => {
+                self.on_active(pane, |s| s.notify(level, text)).await
+            }
+            Command::Snapshot(reply) => {
+                let pane = |side: &Side| PaneSetup {
+                    tabs: side
+                        .tabs
+                        .iter()
+                        .map(|tab| TabSetup {
+                            path: tab.state.location().to_path_buf(),
+                            sort: tab.state.sort(),
+                        })
+                        .collect(),
+                    active_tab: side.active,
+                };
+                let snapshot = SessionSnapshot {
+                    left: pane(&self.sides[0]),
+                    right: pane(&self.sides[1]),
+                    active: self.active,
+                    show_hidden: self.show_hidden,
+                };
+                // The requester may have given up waiting; nothing to do then.
+                let _ = reply.send(snapshot);
+                Ok(())
             }
             Command::Activate(pane) => self.set_active(pane).await,
             Command::SwitchPane => self.set_active(self.active.other()).await,
@@ -484,6 +623,7 @@ impl Core {
                 id,
                 state,
                 loader: None,
+                deferred: None,
             },
         );
         if activate {
@@ -584,8 +724,14 @@ impl Core {
         Ok(())
     }
 
-    /// Publishes the complete state of the active tab of `pane`.
+    /// Publishes the complete state of the active tab of `pane`, starting
+    /// its first load if it was deferred.
     async fn publish_active_tab(&mut self, pane: PaneId) -> Result<(), Disconnected> {
+        let side = &mut self.sides[pane.index()];
+        let index = side.active;
+        if let Some(request) = side.tabs[index].deferred.take() {
+            self.start_load(pane, index, request);
+        }
         let state = self.sides[pane.index()].active();
         let listing = Update::Listing {
             pane,

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/omni-vfs", "crates/omni-core", "crates/omni-ui-slint"]
+members = ["crates/omni-vfs", "crates/omni-core", "crates/omni-config", "crates/omni-ui-slint"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,8 +11,10 @@ publish = false
 [workspace.dependencies]
 omni-vfs = { path = "crates/omni-vfs" }
 omni-core = { path = "crates/omni-core" }
+omni-config = { path = "crates/omni-config" }
 
 anyhow = "1.0.104"
+directories = "6.0.0"
 jiff = "0.2.45"
 slint = { version = "1.18.1", default-features = false, features = [
     "std",
@@ -23,10 +25,12 @@ slint = { version = "1.18.1", default-features = false, features = [
     "accessibility",
     "compat-1-2",
 ] }
+serde = { version = "1.0.229", features = ["derive"] }
 slint-build = "1.18.1"
 tempfile = "3.27.0"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", default-features = false }
+toml = "1.2.1"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 

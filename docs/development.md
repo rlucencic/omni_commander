@@ -23,6 +23,17 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 In debug builds, dependencies are compiled with `opt-level = 2` (see the root
 `Cargo.toml`), which keeps Slint rendering smooth while our crates stay quick to rebuild.
 
+## Configuration while developing
+
+Point `OMNI_CONFIG_DIR` at a scratch directory to try settings without touching your own:
+
+```sh
+OMNI_CONFIG_DIR=/tmp/omni-config cargo run -p omni-ui-slint
+```
+
+The first start writes a commented `settings.toml` there; `session.toml` appears after
+the window is closed normally. Killing the process skips saving the session.
+
 ## Logging
 
 `OMNI_LOG` takes an `EnvFilter` directive. The default is
@@ -73,15 +84,24 @@ machine was heavily loaded during measurement, so these are upper bounds):
 ## Manual UI testing without touching your desktop
 
 The UI can be exercised in a nested X server, so synthetic input cannot reach other
-applications:
+applications. `tools/ui-sandbox/xdrive.py` sends keys, clicks and text through XTest,
+takes screenshots, and closes windows. It refuses to drive your own display.
 
 ```sh
 Xephyr :5 -screen 1280x800 -no-host-grab &
-DISPLAY=:5 cargo run -p omni-ui-slint
+DISPLAY=:5 OMNI_CONFIG_DIR=/tmp/omni-test cargo run -p omni-ui-slint &
+python3 -I tools/ui-sandbox/xdrive.py :5 focus:OmniCommander key:Down key:Return shot:/tmp/a.png
 ```
 
+It needs Python 3 with Pillow, `xwd` and `xwininfo` (all preinstalled on Ubuntu-based
+systems), and `libXtst`.
+
 Without a window manager, give the window keyboard focus explicitly (for example with
-`XSetInputFocus` through XTest tooling) before sending keys.
+`XSetInputFocus` through XTest tooling) before sending keys. To close the window
+normally, so the session is saved, send it a `WM_DELETE_WINDOW` client message.
+
+The Xephyr window may not show the mouse cursor over the app. That is a Xephyr
+limitation, not an OmniCommander bug; check cursor issues on the real desktop.
 
 Vulkan does not go through the nested server's OpenGL, so inside Xephyr the app still
 renders on the host GPU. To test other setups, restrict the Vulkan loader:

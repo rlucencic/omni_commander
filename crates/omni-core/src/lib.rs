@@ -22,6 +22,8 @@ pub mod pane;
 pub mod selection;
 pub mod sort;
 
-pub use app::{AppConfig, AppHandle, Command, PaneConfig, PaneId, Update};
+pub use app::{
+    AppConfig, AppHandle, Command, PaneId, PaneSetup, SessionSnapshot, TabSetup, Update,
+};
 pub use listing::{Listing, Row, SnapshotId};
 pub use sort::{SortKey, SortSpec};

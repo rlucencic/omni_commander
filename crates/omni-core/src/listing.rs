@@ -11,7 +11,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use omni_vfs::Entry;
 
-use crate::filter::Filter;
 use crate::sort::{NameKeys, SortSpec, sorted_order};
 
 /// Identifies one published listing. Commands that refer to a row carry the
@@ -94,14 +93,14 @@ impl Listing {
         }
     }
 
-    /// Only the rows whose names match `filter` (the `..` row stays), under
-    /// a new id. Entry indices are unchanged.
-    pub fn filtered(&self, filter: &Filter) -> Self {
+    /// Only the rows whose entries satisfy `keep` (the `..` row stays),
+    /// under a new id. Entry indices are unchanged.
+    pub fn filtered(&self, keep: impl Fn(&Entry) -> bool) -> Self {
         let order: Vec<u32> = self
             .order
             .iter()
             .copied()
-            .filter(|&i| filter.matches(&self.entries[i as usize].name))
+            .filter(|&i| keep(&self.entries[i as usize]))
             .collect();
         Self {
             id: SnapshotId::next(),
@@ -269,7 +268,8 @@ mod tests {
     #[test]
     fn filtering_keeps_entry_indices_and_parent_row() {
         let l = Listing::new(sample(), SortSpec::default(), true);
-        let f = l.filtered(&Filter::new("*.txt").unwrap());
+        let filter = crate::filter::Filter::new("*.txt").unwrap();
+        let f = l.filtered(|e| filter.matches(&e.name));
         assert_ne!(l.id(), f.id());
         assert_eq!(
             (0..f.len()).map(|r| row_name(&f, r)).collect::<Vec<_>>(),

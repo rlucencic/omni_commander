@@ -5,15 +5,19 @@
 ```text
 omni-ui-slint  (binary: omnicommander)  Slint UI, glue, logging, startup
    │
-   ├──▶ omni-core   application logic: app actor, pane state machine, listings,
-   │       │        sorting, keymap, formatting. No GUI dependency.
+   ├──▶ omni-config  settings.toml / session.toml formats and file handling.
+   │                 Knows nothing about the rest of the application.
+   ├──▶ omni-core    application logic: app actor, pane state machine, listings,
+   │       │         sorting, selection, filter, keymap, formatting. No GUI dependency.
    │       ▼
-   └──▶ omni-vfs    filesystem abstraction (FileSystem trait, capabilities,
-                    Entry model) and providers (LocalFs).
+   └──▶ omni-vfs     filesystem abstraction (FileSystem trait, capabilities,
+                     Entry model) and providers (LocalFs).
 ```
 
-Dependencies point downwards only. `omni-core` and `omni-vfs` never depend on Slint, so
-everything except rendering is tested without a window.
+Dependencies point downwards only. `omni-core`, `omni-config` and `omni-vfs` never
+depend on Slint, so everything except rendering is tested without a window. The
+binary's `startup` module translates between `omni-config`'s file formats and
+`omni-core`'s configuration types; it is pure and unit-tested.
 
 The workspace started with only the crates Milestone 1 needs. Further crates from the
 original plan (`omni-operations`, `omni-config`, `omni-platform`, …) will be added when
@@ -90,6 +94,25 @@ Typed locations are resolved by the pure functions in `omni_core::location`: tri
 quotes, `~`, relative paths, and lexical `..` handling like a shell's `cd`. The pane does
 not check in advance whether the target is a file. If listing fails with "not a directory",
 it shows the parent with the file under the cursor. Breadcrumbs come from the same module.
+
+### Settings and session
+
+- **Two files with different owners.** `settings.toml` belongs to the user: it is created
+  with comments on first run and never rewritten. `session.toml` belongs to the
+  application: it is written atomically (temporary file, then rename) on exit, from a
+  `Command::Snapshot` reply.
+- **Lenient parsing.** Settings are parsed section by section with `deny_unknown_fields`,
+  so a typo resets only its own section. Every problem becomes a warning; warnings are
+  logged and the first one is shown in the left pane.
+- **Shortcuts.** `[keys]` maps action names (`Action::ALL`) to shortcut strings parsed by
+  `KeyChord::from_str`. An override replaces all default shortcuts of that action.
+- **Restoring.** Only the active tab of each pane loads at startup; restored background
+  tabs keep their first load (`Tab::deferred`) until they are activated.
+- **Renderer and theme.** Both are applied before or while the window is created: the
+  renderer through `slint::BackendSelector` (unless `SLINT_BACKEND` is set), the theme
+  through `Palette.color-scheme` (`unknown` follows the system).
+- **Hidden files.** The toggle is global. Each tab's shown listing is its full listing
+  narrowed by the quick filter and the hidden-entry setting, in one filtered view.
 
 ### Tabs
 

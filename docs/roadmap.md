@@ -13,7 +13,7 @@
 - [x] Error reporting in the pane and through `tracing` logs
 - [x] GPU rendering via FemtoVG on wgpu/Vulkan, with automatic software fallback
   (works around an invisible-cursor bug in NVIDIA's OpenGL driver)
-- [x] Unit and integration tests for the core (57 tests), no GUI required
+- [x] Unit and integration tests for the core (57 tests at the end of Milestone 1), no GUI required
 
 ### Known limitations of Milestone 1
 
@@ -31,8 +31,8 @@
   mounts would benefit from lazy metadata.
 - Sorting runs inside the app actor. 100 000 entries take tens of milliseconds in release
   builds; for millions of entries it should move to a blocking task.
-- The renderer can only be chosen with `SLINT_BACKEND`; a renderer setting belongs in
-  the Milestone 2 settings. Slint does not report which renderer it fell back to.
+- Slint does not report which renderer it fell back to. (A renderer setting was added
+  in Milestone 2.)
 - Only Linux (X11) has been run. The code has `cfg` paths for Windows and macOS, but
   they have not been compiled for those targets yet.
 
@@ -51,12 +51,19 @@ Delivered in slices, each tested before the next:
 3. Tabs ✅
    - [x] Per-pane tabs with their own history, selection and filter
    - [x] Ctrl+T, Ctrl+W, Ctrl+Tab, Ctrl+↑, middle-click, tab bar with close buttons
-4. Settings
-   - [ ] `omni-config` crate: TOML settings in the platform config directory
-   - [ ] Restore folders/tabs and sort order on start
-   - [ ] Configurable shortcuts
-   - [ ] Light/dark/system theme, renderer choice, hidden-file toggle
-   - [ ] Automatic refresh with `notify`
+4. Settings ✅
+   - [x] `omni-config` crate: `settings.toml` (user) and `session.toml` (application)
+   - [x] Restore tabs, sort order, active pane and hidden-file toggle on start
+   - [x] Configurable shortcuts by action name, with parse warnings
+   - [x] Light/dark/system theme, renderer choice, hidden-file toggle (Ctrl+H)
+5. Automatic refresh (next)
+   - [ ] Watch the shown folders with `notify`, debounce, refresh keeping cursor and
+     selection; fall back gracefully where watching is unavailable (network mounts)
+
+Known limitations of slice 4: theme and renderer changes need a restart, and there is no
+settings UI yet (edit `settings.toml`). Tabs whose path is not valid Unicode are not saved
+in the session. A restored tab whose folder disappeared shows the error and stays at that
+location (use Backspace to go up).
 
 Known limitations of slice 3: tabs cannot be reordered or dragged to the other pane yet,
 and when there are too many to fit at the minimum width the rest are cut off (no scrolling
