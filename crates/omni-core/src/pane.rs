@@ -10,9 +10,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use omni_vfs::{DirEvent, Entry, FileSystem, child_path};
+use omni_vfs::{DirEvent, Entry, FileSystem, VfsError, child_path};
 
 use crate::listing::{Listing, Row, SnapshotId};
+use crate::location;
 use crate::sort::{SortKey, SortSpec};
 
 /// Minimum time between progress updates while a directory is loading.
@@ -25,6 +26,8 @@ const PARTIAL_INTERVAL: Duration = Duration::from_secs(1);
 /// listings: each one sorts everything received so far, and that cost grows
 /// with the directory (and is much higher in unoptimized builds).
 const PARTIAL_COST_FACTOR: u32 = 10;
+/// Locations remembered in each direction of the navigation history.
+const HISTORY_LIMIT: usize = 100;
 
 /// Identifies one directory enumeration of one pane. Events carrying an
 /// outdated token are ignored.
@@ -79,6 +82,14 @@ pub struct PaneStatus {
     /// Set while a directory is loading.
     pub loading: Option<Loading>,
     pub message: Option<Message>,
+    pub history: HistoryState,
+}
+
+/// Whether the pane can go back or forward in its navigation history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct HistoryState {
+    pub can_go_back: bool,
+    pub can_go_forward: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,14 +120,40 @@ impl Focus {
     }
 }
 
+/// A location in the navigation history, with the cursor as the user left it.
+#[derive(Debug, Clone)]
+struct Visit {
+    path: PathBuf,
+    focus: Focus,
+}
+
+/// How a load moves through the history. Applied only once the load shows
+/// its first listing, so failed navigations never enter the history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HistoryStep {
+    /// Re-reading the same place.
+    Stay,
+    /// A new location: the current one goes onto the back stack.
+    Push,
+    /// This many steps back (several when Back is pressed again while the
+    /// previous step is still loading).
+    Back(usize),
+    Forward(usize),
+}
+
 #[derive(Debug)]
 struct Load {
     token: LoadToken,
     path: PathBuf,
     entries: Vec<Entry>,
     /// Cursor target for the first listing of `path`; taken once published,
-    /// after which the user's own cursor movements win.
+    /// after which the user's own cursor movements win. `None` therefore
+    /// also means "this load has arrived".
     focus: Option<Focus>,
+    history: HistoryStep,
+    /// For typed locations: if `path` is a file, show its directory with
+    /// the file under the cursor instead of failing.
+    open_parent_of_file: bool,
     next_progress: Instant,
     next_partial: Instant,
     /// Whether a partial listing of `path` has been shown.
@@ -137,6 +174,8 @@ pub struct PaneState {
     /// False until the first enumeration finished (successfully or not).
     settled: bool,
     next_token: u64,
+    back: Vec<Visit>,
+    forward: Vec<Visit>,
 }
 
 impl PaneState {
@@ -153,6 +192,8 @@ impl PaneState {
             message: None,
             settled: false,
             next_token: 0,
+            back: Vec::new(),
+            forward: Vec::new(),
         };
         let changes = pane.navigate(path);
         (pane, changes)
@@ -182,17 +223,59 @@ impl PaneState {
                 entries: load.entries.len(),
             }),
             message: self.message.clone(),
+            history: HistoryState {
+                can_go_back: !self.back.is_empty(),
+                can_go_forward: !self.forward.is_empty(),
+            },
         }
     }
 
-    /// Starts loading `path` with the cursor on the first row.
+    /// Goes to `path` with the cursor on the first row.
     pub fn navigate(&mut self, path: PathBuf) -> Changes {
-        self.start_load(path, Focus::top())
+        self.start_load(path, Focus::top(), HistoryStep::Push)
+    }
+
+    /// Goes to a location typed by the user (see
+    /// [`location::resolve_input`]). If it names a file, its directory is
+    /// shown with the file under the cursor.
+    pub fn navigate_to_input(&mut self, input: &str, home: Option<&Path>) -> Changes {
+        let Some(path) = location::resolve_input(input, &self.location, home) else {
+            return Changes::default();
+        };
+        let changes = self.start_load(path, Focus::top(), HistoryStep::Push);
+        if let Some(load) = self.load.as_mut() {
+            load.open_parent_of_file = true;
+        }
+        changes
+    }
+
+    /// Goes back in the history, restoring the cursor as it was left there.
+    pub fn go_back(&mut self) -> Changes {
+        let depth = match self.load.as_ref().map(|load| load.history) {
+            Some(HistoryStep::Back(depth)) => depth + 1,
+            _ => 1,
+        };
+        let Some(visit) = nth_from_end(&self.back, depth).cloned() else {
+            return Changes::default();
+        };
+        self.start_load(visit.path, visit.focus, HistoryStep::Back(depth))
+    }
+
+    /// Goes forward in the history (undoes [`Self::go_back`]).
+    pub fn go_forward(&mut self) -> Changes {
+        let depth = match self.load.as_ref().map(|load| load.history) {
+            Some(HistoryStep::Forward(depth)) => depth + 1,
+            _ => 1,
+        };
+        let Some(visit) = nth_from_end(&self.forward, depth).cloned() else {
+            return Changes::default();
+        };
+        self.start_load(visit.path, visit.focus, HistoryStep::Forward(depth))
     }
 
     /// Re-reads the current directory, keeping the cursor on the same entry.
     pub fn refresh(&mut self) -> Changes {
-        self.start_load(self.location.clone(), self.focus.clone())
+        self.start_load(self.location.clone(), self.focus.clone(), HistoryStep::Stay)
     }
 
     /// Goes to the parent directory with the cursor on the directory we left.
@@ -204,7 +287,7 @@ impl PaneState {
             name: self.location.file_name().map(OsString::from),
             row: 0,
         };
-        self.start_load(parent.to_path_buf(), focus)
+        self.start_load(parent.to_path_buf(), focus, HistoryStep::Push)
     }
 
     /// Opens the row `row` of listing `snapshot`: enters directories, goes up
@@ -283,11 +366,34 @@ impl PaneState {
                 let load = self.load.take().expect("load checked above");
                 self.settled = true;
                 self.message = summarize_warnings(&load.warnings);
-                self.show(load.path, load.focus, load.entries)
+                self.show(load.path, load.focus, load.history, load.entries)
             }
             DirEvent::Failed(err) => {
                 let load = self.load.take().expect("load checked above");
+                let arrived = load.focus.is_none();
+                if !arrived
+                    && load.open_parent_of_file
+                    && matches!(err, VfsError::NotADirectory { .. })
+                    && let (Some(parent), Some(name)) = (load.path.parent(), load.path.file_name())
+                {
+                    let focus = Focus {
+                        name: Some(name.to_os_string()),
+                        row: 0,
+                    };
+                    return self.start_load(parent.to_path_buf(), focus, load.history);
+                }
                 tracing::info!(%err, "cannot list directory");
+                if !arrived {
+                    // A history entry that cannot be shown would block the
+                    // way back; drop it.
+                    match load.history {
+                        HistoryStep::Back(depth) => remove_nth_from_end(&mut self.back, depth),
+                        HistoryStep::Forward(depth) => {
+                            remove_nth_from_end(&mut self.forward, depth)
+                        }
+                        HistoryStep::Stay | HistoryStep::Push => {}
+                    }
+                }
                 let mut changes = Changes::status();
                 if !self.settled && !load.partial_shown {
                     // Nothing was ever shown: show the failed location empty so
@@ -312,7 +418,7 @@ impl PaneState {
         }
     }
 
-    fn start_load(&mut self, path: PathBuf, focus: Focus) -> Changes {
+    fn start_load(&mut self, path: PathBuf, focus: Focus, history: HistoryStep) -> Changes {
         self.next_token += 1;
         let token = LoadToken(self.next_token);
         self.load = Some(Load {
@@ -320,6 +426,8 @@ impl PaneState {
             path: path.clone(),
             entries: Vec::new(),
             focus: Some(focus),
+            history,
+            open_parent_of_file: false,
             next_progress: Instant::now(),
             next_partial: Instant::now() + PARTIAL_DELAY,
             partial_shown: false,
@@ -339,7 +447,8 @@ impl PaneState {
         let load = self.load.as_mut().expect("partial listings require a load");
         load.partial_shown = true;
         let (path, focus, entries) = (load.path.clone(), load.focus.take(), load.entries.clone());
-        let changes = self.show(path, focus, entries);
+        let history = load.history;
+        let changes = self.show(path, focus, history, entries);
 
         let cost = work.elapsed();
         let load = self.load.as_mut().expect("show keeps the load");
@@ -352,10 +461,18 @@ impl PaneState {
         changes
     }
 
-    /// Shows `entries` as the listing of `path`. `focus` is the cursor target
-    /// of a load's first listing; later listings keep the user's cursor.
-    fn show(&mut self, path: PathBuf, focus: Option<Focus>, entries: Vec<Entry>) -> Changes {
+    /// Shows `entries` as the listing of `path`. `focus` is set for a load's
+    /// first listing: the load arrives, its history step is applied, and the
+    /// cursor goes to `focus`. Later listings keep the user's cursor.
+    fn show(
+        &mut self,
+        path: PathBuf,
+        focus: Option<Focus>,
+        history: HistoryStep,
+        entries: Vec<Entry>,
+    ) -> Changes {
         if let Some(focus) = focus {
+            self.record_history(&path, history);
             self.focus = focus;
         }
         let has_parent = path.parent().is_some();
@@ -376,9 +493,65 @@ impl PaneState {
         row
     }
 
+    /// Updates the history for arriving at `destination`. Uses the location
+    /// and cursor being left, so call before replacing them.
+    fn record_history(&mut self, destination: &Path, step: HistoryStep) {
+        let here = Visit {
+            path: self.location.clone(),
+            focus: self.focus.clone(),
+        };
+        match step {
+            HistoryStep::Stay => {}
+            // Nothing was shown before the first load, so there is nowhere
+            // to go back to.
+            HistoryStep::Push if !self.settled || destination == self.location => {}
+            HistoryStep::Push => {
+                push_limited(&mut self.back, here);
+                self.forward.clear();
+            }
+            HistoryStep::Back(depth) => {
+                step_through(&mut self.back, &mut self.forward, here, depth)
+            }
+            HistoryStep::Forward(depth) => {
+                step_through(&mut self.forward, &mut self.back, here, depth)
+            }
+        }
+    }
+
     fn set_message(&mut self, level: Level, text: String) -> Changes {
         self.message = Some(Message { level, text });
         Changes::status()
+    }
+}
+
+/// Moves `depth` steps from the `from` stack to the `to` stack: the location
+/// being left and any skipped ones go onto `to`, the destination leaves
+/// `from`.
+fn step_through(from: &mut Vec<Visit>, to: &mut Vec<Visit>, here: Visit, depth: usize) {
+    push_limited(to, here);
+    for _ in 1..depth {
+        if let Some(skipped) = from.pop() {
+            push_limited(to, skipped);
+        }
+    }
+    from.pop();
+}
+
+fn push_limited(stack: &mut Vec<Visit>, visit: Visit) {
+    if stack.len() == HISTORY_LIMIT {
+        stack.remove(0);
+    }
+    stack.push(visit);
+}
+
+/// The `n`-th visit from the top of a history stack (1 = top).
+fn nth_from_end(stack: &[Visit], n: usize) -> Option<&Visit> {
+    stack.len().checked_sub(n).map(|i| &stack[i])
+}
+
+fn remove_nth_from_end(stack: &mut Vec<Visit>, n: usize) {
+    if let Some(i) = stack.len().checked_sub(n) {
+        stack.remove(i);
     }
 }
 
@@ -674,5 +847,169 @@ mod tests {
         let message = pane.status().message.unwrap();
         assert_eq!(message.level, Level::Warning);
         assert!(message.text.contains("and 1 more"), "{}", message.text);
+    }
+
+    /// Completes the load requested by `changes` with `entries`.
+    fn arrive(pane: &mut PaneState, changes: Changes, entries: Vec<Entry>) -> Changes {
+        let req = changes.load.expect("a load was requested");
+        complete(pane, &req, entries)
+    }
+
+    fn history(pane: &PaneState) -> (bool, bool) {
+        let h = pane.status().history;
+        (h.can_go_back, h.can_go_forward)
+    }
+
+    fn home() -> PathBuf {
+        root().join("home").join("user")
+    }
+
+    #[test]
+    fn back_and_forward_restore_location_and_cursor() {
+        let mut pane = loaded_pane(vec![dir("a"), dir("b"), file("x")]);
+        assert_eq!(
+            history(&pane),
+            (false, false),
+            "the start location is not history"
+        );
+        pane.cursor_moved(pane.listing().id(), 2); // "b"
+        let changes = pane.open(pane.listing().id(), 2);
+        let _ = arrive(&mut pane, changes, vec![file("inside")]);
+        assert_eq!(pane.location(), home().join("b"));
+        assert_eq!(history(&pane), (true, false));
+
+        let changes = pane.go_back();
+        assert_eq!(changes.load.as_ref().unwrap().path, home());
+        let changes = arrive(&mut pane, changes, vec![dir("a"), dir("b"), file("x")]);
+        assert_eq!(changes.listing, Some(2), "cursor back on 'b'");
+        assert_eq!(history(&pane), (false, true));
+
+        let changes = pane.go_forward();
+        let _ = arrive(&mut pane, changes, vec![file("inside")]);
+        assert_eq!(pane.location(), home().join("b"));
+        assert_eq!(history(&pane), (true, false));
+    }
+
+    #[test]
+    fn new_navigation_clears_forward_history() {
+        let mut pane = loaded_pane(vec![dir("a"), dir("b")]);
+        let changes = pane.navigate(home().join("a"));
+        let _ = arrive(&mut pane, changes, vec![]);
+        let changes = pane.go_back();
+        let _ = arrive(&mut pane, changes, vec![dir("a"), dir("b")]);
+        assert_eq!(history(&pane), (false, true));
+
+        let changes = pane.navigate(home().join("b"));
+        let _ = arrive(&mut pane, changes, vec![]);
+        assert_eq!(history(&pane), (true, false));
+    }
+
+    #[test]
+    fn refreshes_and_failures_do_not_enter_history() {
+        let mut pane = loaded_pane(vec![dir("a")]);
+        let changes = pane.refresh();
+        let _ = arrive(&mut pane, changes, vec![dir("a")]);
+        let changes = pane.navigate(home());
+        let _ = arrive(&mut pane, changes, vec![dir("a")]);
+        assert_eq!(history(&pane), (false, false));
+
+        let req = pane.navigate(home().join("a")).load.unwrap();
+        let err = VfsError::PermissionDenied {
+            path: req.path.clone(),
+        };
+        let _ = pane.on_dir_event(req.token, DirEvent::Failed(err), Instant::now());
+        assert_eq!(history(&pane), (false, false));
+    }
+
+    #[test]
+    fn pressing_back_again_while_loading_goes_further() {
+        let mut pane = loaded_pane(vec![]); // A = home
+        for name in ["b", "c"] {
+            let changes = pane.navigate(home().join(name));
+            let _ = arrive(&mut pane, changes, vec![]);
+        }
+        // History: A, B; current C.
+        let first = pane.go_back().load.unwrap();
+        assert_eq!(first.path, home().join("b"));
+        let changes = pane.go_back();
+        assert_eq!(changes.load.as_ref().unwrap().path, home());
+        let _ = arrive(&mut pane, changes, vec![]);
+        assert_eq!(pane.location(), home());
+        assert_eq!(history(&pane), (false, true));
+
+        // Forward walks through the skipped location again.
+        let changes = pane.go_forward();
+        assert_eq!(changes.load.as_ref().unwrap().path, home().join("b"));
+        let _ = arrive(&mut pane, changes, vec![]);
+        let changes = pane.go_forward();
+        assert_eq!(changes.load.as_ref().unwrap().path, home().join("c"));
+    }
+
+    #[test]
+    fn unreachable_history_entries_are_dropped() {
+        let mut pane = loaded_pane(vec![]);
+        let changes = pane.navigate(home().join("gone"));
+        let _ = arrive(&mut pane, changes, vec![]);
+        let changes = pane.navigate(home().join("next"));
+        let _ = arrive(&mut pane, changes, vec![]);
+        // History: home, gone; current next. "gone" disappears.
+        let req = pane.go_back().load.unwrap();
+        let err = VfsError::NotFound {
+            path: req.path.clone(),
+        };
+        let _ = pane.on_dir_event(req.token, DirEvent::Failed(err), Instant::now());
+        assert_eq!(pane.location(), home().join("next"));
+        let changes = pane.go_back();
+        assert_eq!(
+            changes.load.unwrap().path,
+            home(),
+            "skips the dropped entry"
+        );
+    }
+
+    #[test]
+    fn history_is_bounded() {
+        let mut pane = loaded_pane(vec![]);
+        for i in 0..HISTORY_LIMIT + 20 {
+            let changes = pane.navigate(home().join(i.to_string()));
+            let _ = arrive(&mut pane, changes, vec![]);
+        }
+        assert_eq!(pane.back.len(), HISTORY_LIMIT);
+    }
+
+    #[test]
+    fn typed_locations_resolve_against_the_current_directory() {
+        let mut pane = loaded_pane(vec![dir("sub")]);
+        assert_eq!(pane.navigate_to_input("   ", None), Changes::default());
+        let req = pane.navigate_to_input("sub/../sub", None).load.unwrap();
+        assert_eq!(req.path, home().join("sub"));
+    }
+
+    #[test]
+    fn typed_file_path_opens_its_directory_with_the_file_selected() {
+        let mut pane = loaded_pane(vec![dir("sub")]);
+        let req = pane.navigate_to_input("sub/notes.txt", None).load.unwrap();
+        let err = VfsError::NotADirectory {
+            path: req.path.clone(),
+        };
+        let changes = pane.on_dir_event(req.token, DirEvent::Failed(err), Instant::now());
+        let changes = arrive(&mut pane, changes, vec![file("a.txt"), file("notes.txt")]);
+        assert_eq!(pane.location(), home().join("sub"));
+        assert_eq!(changes.listing, Some(2), "cursor on notes.txt");
+        assert_eq!(pane.status().message, None);
+        assert_eq!(history(&pane), (true, false));
+    }
+
+    #[test]
+    fn opening_a_file_path_from_a_listing_still_fails_normally() {
+        // Only typed locations fall back to the parent directory.
+        let mut pane = loaded_pane(vec![dir("sub")]);
+        let req = pane.navigate(home().join("file")).load.unwrap();
+        let err = VfsError::NotADirectory {
+            path: req.path.clone(),
+        };
+        let changes = pane.on_dir_event(req.token, DirEvent::Failed(err), Instant::now());
+        assert_eq!(changes.load, None);
+        assert_eq!(pane.status().message.unwrap().level, Level::Error);
     }
 }

@@ -74,6 +74,23 @@ reports moves (`CursorMoved`) and the core remembers the entry *name*. When a li
 changes (refresh, re-sort, going up), the core tells the UI where to put the cursor: on
 the same entry if it still exists, otherwise on the same row.
 
+### Navigation history
+
+Each pane keeps two stacks of visited locations (back and forward). Every entry remembers
+where the cursor was. Each load carries a `HistoryStep` (`Stay`, `Push`, `Back(n)`,
+`Forward(n)`), applied only when the load shows its first listing:
+
+- Failed navigations never enter the history.
+- Pressing Back again while the previous step is still loading goes one step further
+  (`Back(2)`); the skipped location moves to the forward stack.
+- A history entry that can no longer be listed is dropped, so it cannot block the way back.
+- Each direction keeps at most 100 entries.
+
+Typed locations are resolved by the pure functions in `omni_core::location`: trimming,
+quotes, `~`, relative paths, and lexical `..` handling like a shell's `cd`. The pane does
+not check in advance whether the target is a file. If listing fails with "not a directory",
+it shows the parent with the file under the cursor. Breadcrumbs come from the same module.
+
 ### Rendering large listings
 
 The Slint model (`RowsModel`) wraps the current `Arc<Listing>` and formats rows lazily

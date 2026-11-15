@@ -73,9 +73,22 @@ pub enum Command {
     GoUp {
         pane: PaneId,
     },
+    GoBack {
+        pane: PaneId,
+    },
+    GoForward {
+        pane: PaneId,
+    },
+    /// Go to an exact location (e.g. a breadcrumb).
     Navigate {
         pane: PaneId,
         path: PathBuf,
+    },
+    /// Go to a location typed by the user: may be relative, start with `~`,
+    /// or name a file (whose directory is then shown).
+    NavigateToInput {
+        pane: PaneId,
+        input: String,
     },
     Refresh {
         pane: PaneId,
@@ -242,7 +255,16 @@ impl Core {
                 return Ok(());
             }
             Command::GoUp { pane } => (pane, self.pane(pane).go_up()),
+            Command::GoBack { pane } => (pane, self.pane(pane).go_back()),
+            Command::GoForward { pane } => (pane, self.pane(pane).go_forward()),
             Command::Navigate { pane, path } => (pane, self.pane(pane).navigate(path)),
+            Command::NavigateToInput { pane, input } => {
+                let home = std::env::home_dir();
+                (
+                    pane,
+                    self.pane(pane).navigate_to_input(&input, home.as_deref()),
+                )
+            }
             Command::Refresh { pane } => (pane, self.pane(pane).refresh()),
             Command::SortBy { pane, key } => (pane, self.pane(pane).sort_by(key)),
             Command::Activate(pane) => return self.set_active(pane).await,

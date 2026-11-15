@@ -1,6 +1,6 @@
 // One file panel: location bar, column headers, virtualized rows, status.
 
-import { ListView, Palette } from "std-widgets.slint";
+import { LineEdit, ListView, Palette } from "std-widgets.slint";
 import { EntryIcon, FileRow, MessageLevel, Metrics, PaneInfo, SortColumn } from "types.slint";
 
 // Horizontal geometry shared by the header and every row. Cells are placed
@@ -185,6 +185,8 @@ component FileRowView inherits Rectangle {
     in property <bool> pane-active;
     callback clicked;
     callback double-clicked;
+    /// The mouse's back (false) or forward (true) button was pressed.
+    callback history-button(forward: bool);
 
     property <bool> highlighted: root.current && root.pane-active;
     property <brush> base-color: root.highlighted ? Palette.selection-foreground : Palette.foreground;
@@ -202,6 +204,15 @@ component FileRowView inherits Rectangle {
         }
         double-clicked => {
             root.double-clicked();
+        }
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.down {
+                if event.button == PointerEventButton.back {
+                    root.history-button(false);
+                } else if event.button == PointerEventButton.forward {
+                    root.history-button(true);
+                }
+            }
         }
     }
 
@@ -255,6 +266,252 @@ component FileRowView inherits Rectangle {
     }
 }
 
+// Back / forward / up button with a chevron icon.
+component NavButton inherits Rectangle {
+    /// 0 = back, 1 = forward, 2 = up.
+    in property <int> direction;
+    in property <bool> enabled;
+    in property <brush> foreground;
+    callback clicked;
+
+    width: 24px;
+    border-radius: 3px;
+    background: touch.has-hover && root.enabled ? root.foreground.transparentize(0.85) : transparent;
+    opacity: root.enabled ? 1.0 : 0.35;
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    if root.direction == 0: Path {
+        x: (root.width - 14px) / 2;
+        y: (root.height - 14px) / 2;
+        width: 14px;
+        height: 14px;
+        viewbox-width: 14;
+        viewbox-height: 14;
+        commands: "M9 2.5 L4.5 7 L9 11.5";
+        stroke: root.foreground;
+        stroke-width: 1.5px;
+    }
+    if root.direction == 1: Path {
+        x: (root.width - 14px) / 2;
+        y: (root.height - 14px) / 2;
+        width: 14px;
+        height: 14px;
+        viewbox-width: 14;
+        viewbox-height: 14;
+        commands: "M5 2.5 L9.5 7 L5 11.5";
+        stroke: root.foreground;
+        stroke-width: 1.5px;
+    }
+    if root.direction == 2: Path {
+        x: (root.width - 14px) / 2;
+        y: (root.height - 14px) / 2;
+        width: 14px;
+        height: 14px;
+        viewbox-width: 14;
+        viewbox-height: 14;
+        commands: "M2.5 9 L7 4.5 L11.5 9";
+        stroke: root.foreground;
+        stroke-width: 1.5px;
+    }
+}
+
+// One clickable path segment, followed by a separator unless it is the last.
+component CrumbView inherits Rectangle {
+    in property <string> text;
+    in property <bool> last;
+    in property <brush> foreground;
+    callback clicked;
+
+    border-radius: 3px;
+    background: touch.has-hover ? root.foreground.transparentize(0.85) : transparent;
+
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 4px;
+        padding-right: 4px;
+        spacing: 5px;
+
+        Text {
+            text: root.text;
+            color: root.foreground;
+            vertical-alignment: center;
+            font-weight: root.last ? 700 : 400;
+        }
+
+        if !root.last: Rectangle {
+            width: 6px;
+            Path {
+                y: (parent.height - 10px) / 2;
+                width: 6px;
+                height: 10px;
+                viewbox-width: 6;
+                viewbox-height: 10;
+                commands: "M1 1 L5 5 L1 9";
+                stroke: root.foreground;
+                stroke-width: 1px;
+                opacity: 0.7;
+            }
+        }
+    }
+}
+
+// Navigation buttons plus either breadcrumbs or a path editor.
+component LocationBar inherits Rectangle {
+    in property <PaneInfo> info;
+    in property <bool> active;
+    out property <bool> editing: false;
+
+    /// Any click in the bar: the pane becomes active.
+    callback activate;
+    callback crumb-clicked(index: int);
+    callback go-back;
+    callback go-forward;
+    callback go-up;
+    callback location-entered(text: string);
+    /// Editing ended (accepted or cancelled); keyboard focus should return
+    /// to the file list.
+    callback edit-finished;
+
+    property <brush> foreground: root.active ? Palette.accent-foreground : Palette.foreground;
+
+    public function edit() {
+        root.editing = true;
+        editor.text = root.info.location;
+        editor.focus();
+        editor.select-all();
+    }
+
+    function stop-editing() {
+        if root.editing {
+            root.editing = false;
+            root.edit-finished();
+        }
+    }
+
+    height: 30px;
+    background: root.active ? Palette.accent-background : Palette.alternate-background;
+
+    HorizontalLayout {
+        padding: 3px;
+        spacing: 1px;
+
+        NavButton {
+            direction: 0;
+            enabled: root.info.can-go-back;
+            foreground: root.foreground;
+            clicked => {
+                root.activate();
+                root.go-back();
+            }
+        }
+
+        NavButton {
+            direction: 1;
+            enabled: root.info.can-go-forward;
+            foreground: root.foreground;
+            clicked => {
+                root.activate();
+                root.go-forward();
+            }
+        }
+
+        NavButton {
+            direction: 2;
+            enabled: root.info.crumbs.length > 1;
+            foreground: root.foreground;
+            clicked => {
+                root.activate();
+                root.go-up();
+            }
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+            clip: true;
+
+            // Scrolled to the end, so long paths show their last segments.
+            // The explicit size matters: without it, Slint forwards the
+            // crumbs' preferred width to the Flickable and the pane would
+            // grow with the path.
+            crumbs-view := Flickable {
+                width: parent.width;
+                height: parent.height;
+                visible: !root.editing;
+                interactive: false;
+                content-width: max(self.width, crumbs-row.preferred-width);
+                content-x: min(0px, self.width - self.content-width);
+
+                crumbs-row := HorizontalLayout {
+                    width: crumbs-view.content-width;
+                    height: crumbs-view.height;
+
+                    for crumb[index] in root.info.crumbs: CrumbView {
+                        text: crumb;
+                        last: index == root.info.crumbs.length - 1;
+                        foreground: root.foreground;
+                        clicked => {
+                            root.activate();
+                            root.crumb-clicked(index);
+                        }
+                    }
+
+                    // Clicking the empty space after the crumbs edits the path.
+                    TouchArea {
+                        horizontal-stretch: 1;
+                        clicked => {
+                            root.activate();
+                            root.edit();
+                        }
+                    }
+                }
+            }
+
+            FocusScope {
+                width: parent.width;
+                height: parent.height;
+                visible: root.editing;
+                // Keys the editor does not use (Tab, F-keys, arrows up/down)
+                // must not trigger file-list shortcuts while typing.
+                key-pressed(event) => {
+                    accept
+                }
+
+                editor := LineEdit {
+                    width: parent.width;
+                    height: parent.height;
+                    key-pressed(event) => {
+                        if event.text == Key.Escape {
+                            root.stop-editing();
+                            return accept;
+                        }
+                        reject
+                    }
+                    accepted(text) => {
+                        root.stop-editing();
+                        root.location-entered(text);
+                    }
+                    changed has-focus => {
+                        if !self.has-focus {
+                            root.stop-editing();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 export component FilePane inherits Rectangle {
     in property <[FileRow]> rows;
     in property <PaneInfo> info;
@@ -265,6 +522,16 @@ export component FilePane inherits Rectangle {
     callback activated(row: int);
     callback clicked;
     callback sort-requested(column: SortColumn);
+    callback crumb-clicked(index: int);
+    callback go-back;
+    callback go-forward;
+    callback go-up;
+    callback location-entered(text: string);
+    callback edit-finished;
+
+    public function edit-location() {
+        location.edit();
+    }
 
     // Fixed-width columns are laid out from the right edge; the name column
     // takes what remains. Narrow panes drop the date and attribute columns.
@@ -329,26 +596,29 @@ export component FilePane inherits Rectangle {
     VerticalLayout {
         padding: 1px;
 
-        // Location bar.
-        Rectangle {
-            height: 26px;
-            background: root.active ? Palette.accent-background : Palette.alternate-background;
-
-            TouchArea {
-                clicked => {
-                    root.clicked();
-                }
+        location := LocationBar {
+            info: root.info;
+            active: root.active;
+            activate => {
+                root.clicked();
             }
-
-            Text {
-                x: 8px;
-                width: parent.width - 16px;
-                height: parent.height;
-                text: root.info.location;
-                vertical-alignment: center;
-                overflow: elide;
-                font-weight: 600;
-                color: root.active ? Palette.accent-foreground : Palette.foreground;
+            crumb-clicked(index) => {
+                root.crumb-clicked(index);
+            }
+            go-back => {
+                root.go-back();
+            }
+            go-forward => {
+                root.go-forward();
+            }
+            go-up => {
+                root.go-up();
+            }
+            location-entered(text) => {
+                root.location-entered(text);
+            }
+            edit-finished => {
+                root.edit-finished();
             }
         }
 
@@ -429,6 +699,14 @@ export component FilePane inherits Rectangle {
                 }
                 double-clicked => {
                     root.activated(index);
+                }
+                history-button(forward) => {
+                    root.clicked();
+                    if forward {
+                        root.go-forward();
+                    } else {
+                        root.go-back();
+                    }
                 }
             }
         }

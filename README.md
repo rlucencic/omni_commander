@@ -4,10 +4,11 @@ A cross-platform, dual-pane file manager written in Rust with a [Slint](https://
 user interface. It aims to combine the power-user file management of Total Commander and
 Double Commander with modern navigation and presentation.
 
-> **Status:** Milestone 1 (functional foundation). You can browse local directories in two
-> independent panes. File operations are not implemented yet; see [docs/roadmap.md](docs/roadmap.md).
+> **Status:** Milestone 2 in progress. You can browse local directories in two independent
+> panes with history, breadcrumbs and an editable location. File operations are not
+> implemented yet; see [docs/roadmap.md](docs/roadmap.md).
 
-## Features (Milestone 1)
+## Features
 
 - Two independent panes, each listing a local directory
 - Asynchronous, cancellable directory enumeration; the UI never waits on the disk
@@ -17,6 +18,9 @@ Double Commander with modern navigation and presentation.
   sort by name, extension, size or date
 - Symbolic links (including broken ones), hidden files, and names that are not valid UTF-8
 - Errors such as "permission denied" are reported in the pane, which stays usable
+- Back/forward history per pane that restores the cursor, clickable breadcrumbs, and
+  an editable location: `~`, relative paths and `..` work, and a file path opens its
+  folder with the file selected
 - Keyboard-driven navigation through a toolkit-independent keymap
 - Follows the system light/dark preference; vector icons for crisp rendering at any DPI
 
@@ -27,6 +31,9 @@ Double Commander with modern navigation and presentation.
 | ↑ ↓ PgUp PgDn Home End | Move the cursor |
 | Enter / double-click | Open the directory under the cursor (`..` goes up) |
 | Backspace, Ctrl+PgUp | Go to the parent directory |
+| Alt+← / Alt+→, mouse back/forward buttons | Back / forward in the pane's history |
+| Ctrl+L, or click the empty part of the location bar | Edit the location (Enter go, Esc cancel) |
+| Click a breadcrumb | Go to that folder |
 | Tab, Shift+Tab | Switch the active pane |
 | Ctrl+R | Re-read the active pane |
 | Ctrl+F3 / F4 / F5 / F6 | Sort by name / extension / date / size (again: reverse) |

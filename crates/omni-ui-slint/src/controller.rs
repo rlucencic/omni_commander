@@ -11,9 +11,10 @@ use std::rc::Rc;
 use omni_core::app::{AppHandle, Command, PaneId, Update};
 use omni_core::format::{TimeFormatter, format_count, format_totals};
 use omni_core::keymap::{Action, Keymap, Modifiers};
+use omni_core::location::breadcrumbs;
 use omni_core::pane::{Level, PaneStatus};
 use omni_core::{SortKey, SortSpec};
-use slint::{ComponentHandle, ModelRc};
+use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 use tokio::sync::mpsc;
 
 use crate::keys::chord_from_slint;
@@ -23,6 +24,8 @@ use crate::{AppWindow, MessageLevel, PaneInfo, SortColumn};
 struct PaneView {
     rows: Rc<RowsModel>,
     location: RefCell<Option<PathBuf>>,
+    /// Targets of the breadcrumbs currently shown, in display order.
+    crumb_paths: RefCell<Vec<PathBuf>>,
 }
 
 pub struct Controller {
@@ -41,6 +44,7 @@ impl Controller {
         let pane_view = || PaneView {
             rows: Rc::new(RowsModel::new(time.clone())),
             location: RefCell::new(None),
+            crumb_paths: RefCell::new(Vec::new()),
         };
         let controller = Rc::new(Self {
             window: window.as_weak(),
@@ -86,6 +90,43 @@ impl Controller {
                 key: sort_key(column),
             });
         });
+        let c = Rc::clone(&controller);
+        window.on_crumb_clicked(move |pane, index| {
+            let pane = pane_id(pane);
+            let target = c.panes[pane.index()]
+                .crumb_paths
+                .borrow()
+                .get(to_row(index))
+                .cloned();
+            if let Some(path) = target {
+                c.app.send(Command::Navigate { pane, path });
+            }
+        });
+        let c = Rc::clone(&controller);
+        window.on_location_entered(move |pane, text| {
+            c.app.send(Command::NavigateToInput {
+                pane: pane_id(pane),
+                input: text.into(),
+            });
+        });
+        let c = Rc::clone(&controller);
+        window.on_go_back(move |pane| {
+            c.app.send(Command::GoBack {
+                pane: pane_id(pane),
+            })
+        });
+        let c = Rc::clone(&controller);
+        window.on_go_forward(move |pane| {
+            c.app.send(Command::GoForward {
+                pane: pane_id(pane),
+            })
+        });
+        let c = Rc::clone(&controller);
+        window.on_go_up(move |pane| {
+            c.app.send(Command::GoUp {
+                pane: pane_id(pane),
+            })
+        });
 
         controller
     }
@@ -116,8 +157,13 @@ impl Controller {
                 let new_location = view.location.borrow().as_ref() != Some(&location);
                 let totals = listing.totals();
                 view.rows.set_listing(listing);
+                let crumbs = breadcrumbs(&location);
+                let labels: Vec<SharedString> =
+                    crumbs.iter().map(|c| c.label.as_str().into()).collect();
+                *view.crumb_paths.borrow_mut() = crumbs.into_iter().map(|c| c.path).collect();
                 self.edit_info(&window, pane, |info| {
                     info.location = location.display().to_string().into();
+                    info.crumbs = ModelRc::new(VecModel::from(labels));
                     info.summary = format_totals(&totals).into();
                     let (column, descending) = sort_column(sort);
                     info.sort_column = column;
@@ -158,6 +204,9 @@ impl Controller {
             Action::CursorLast => window.invoke_set_cursor(index, i32::MAX, false),
             Action::Open => self.open(pane, to_row(self.cursor(&window, pane))),
             Action::GoUp => self.app.send(Command::GoUp { pane }),
+            Action::GoBack => self.app.send(Command::GoBack { pane }),
+            Action::GoForward => self.app.send(Command::GoForward { pane }),
+            Action::EditLocation => window.invoke_edit_location(index),
             Action::SwitchPane => self.app.send(Command::SwitchPane),
             Action::Refresh => self.app.send(Command::Refresh { pane }),
             Action::SortBy(key) => self.app.send(Command::SortBy { pane, key }),
@@ -199,6 +248,8 @@ impl Controller {
 }
 
 fn apply_status(info: &mut PaneInfo, status: &PaneStatus) {
+    info.can_go_back = status.history.can_go_back;
+    info.can_go_forward = status.history.can_go_forward;
     info.loading = match &status.loading {
         Some(loading) => format!(
             "Loading… {} entries  ({})",

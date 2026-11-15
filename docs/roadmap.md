@@ -36,11 +36,30 @@
 - Only Linux (X11) has been run. The code has `cfg` paths for Windows and macOS, but
   they have not been compiled for those targets yet.
 
-## Milestone 2: navigation and usability
+## Milestone 2: navigation and usability (in progress)
 
-Tabs, navigation history (Alt+Left/Right), breadcrumbs, editable location (Ctrl+L),
-multi-selection (Insert/Space/Ctrl+A), quick filter, persistent settings (TOML), user
-keymaps, explicit light/dark theme (`Palette.color-scheme`), filesystem watching.
+Delivered in slices, each tested before the next:
+
+1. Navigation ✅
+   - [x] Back/forward history per pane, restoring the cursor (Alt+←/→, mouse buttons)
+   - [x] Breadcrumbs with back/forward/up buttons
+   - [x] Editable location (Ctrl+L): `~`, relative paths, file paths open their folder
+2. Selection and filtering
+   - [ ] Multi-selection: Insert, Space, Shift+arrows, Ctrl+A, Ctrl/Shift+click
+   - [ ] Selection summary in the status line
+   - [ ] Quick filter
+3. Tabs
+   - [ ] Per-pane tabs: Ctrl+T, Ctrl+W, Ctrl+Tab, tab bar
+4. Settings
+   - [ ] `omni-config` crate: TOML settings in the platform config directory
+   - [ ] Restore folders/tabs and sort order on start
+   - [ ] Configurable shortcuts
+   - [ ] Light/dark/system theme, renderer choice, hidden-file toggle
+   - [ ] Automatic refresh with `notify`
+
+Known limitations of slice 1: breadcrumbs are cut off on the left without an
+ellipsis, and editing the text of a path whose name is not valid UTF-8 cannot reproduce
+the original bytes (navigating via breadcrumbs or the list still works).
 
 ## Milestone 3: file operations
 

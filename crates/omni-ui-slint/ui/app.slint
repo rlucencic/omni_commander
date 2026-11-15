@@ -35,6 +35,20 @@ export component AppWindow inherits Window {
     callback row-activated(pane: int, row: int);
     callback pane-clicked(pane: int);
     callback sort-requested(pane: int, column: SortColumn);
+    callback crumb-clicked(pane: int, index: int);
+    callback location-entered(pane: int, text: string);
+    callback go-back(pane: int);
+    callback go-forward(pane: int);
+    callback go-up(pane: int);
+
+    /// Opens the path editor of a pane (Ctrl+L).
+    public function edit-location(pane: int) {
+        if pane == 0 {
+            left.edit-location();
+        } else {
+            right.edit-location();
+        }
+    }
 
     /// Places the cursor after a new listing arrived.
     public function set-cursor(pane: int, row: int, scroll-to-top: bool) {
@@ -90,6 +104,24 @@ export component AppWindow inherits Window {
                     sort-requested(column) => {
                         root.sort-requested(0, column);
                     }
+                    crumb-clicked(index) => {
+                        root.crumb-clicked(0, index);
+                    }
+                    location-entered(text) => {
+                        root.location-entered(0, text);
+                    }
+                    go-back => {
+                        root.go-back(0);
+                    }
+                    go-forward => {
+                        root.go-forward(0);
+                    }
+                    go-up => {
+                        root.go-up(0);
+                    }
+                    edit-finished => {
+                        keys.focus();
+                    }
                 }
 
                 right := FilePane {
@@ -109,11 +141,29 @@ export component AppWindow inherits Window {
                     sort-requested(column) => {
                         root.sort-requested(1, column);
                     }
+                    crumb-clicked(index) => {
+                        root.crumb-clicked(1, index);
+                    }
+                    location-entered(text) => {
+                        root.location-entered(1, text);
+                    }
+                    go-back => {
+                        root.go-back(1);
+                    }
+                    go-forward => {
+                        root.go-forward(1);
+                    }
+                    go-up => {
+                        root.go-up(1);
+                    }
+                    edit-finished => {
+                        keys.focus();
+                    }
                 }
             }
 
             Text {
-                text: "Enter open   Backspace parent   Tab switch pane   Ctrl+R refresh   Ctrl+F3/F4/F5/F6 sort by name/ext/date/size";
+                text: "Enter open   Backspace parent   Alt+←/→ back/forward   Ctrl+L edit path   Tab switch pane   Ctrl+R refresh   Ctrl+F3–F6 sort";
                 font-size: 11px;
                 color: Palette.foreground;
                 opacity: 0.6;

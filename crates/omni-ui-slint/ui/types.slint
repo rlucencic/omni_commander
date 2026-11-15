@@ -20,6 +20,10 @@ export struct FileRow {
 /// Everything about a pane except its rows.
 export struct PaneInfo {
     location: string,
+    /// Breadcrumb labels, root first.
+    crumbs: [string],
+    can-go-back: bool,
+    can-go-forward: bool,
     summary: string,
     /// Non-empty while a directory is loading.
     loading: string,

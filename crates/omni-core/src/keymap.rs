@@ -77,6 +77,16 @@ impl KeyChord {
         }
     }
 
+    pub fn alt(key: Key) -> Self {
+        Self {
+            key,
+            mods: Modifiers {
+                alt: true,
+                ..Modifiers::default()
+            },
+        }
+    }
+
     /// Normalizes a chord coming from a key event: letters are stored
     /// lower-case so `Shift+A` and `Shift+a` are the same binding.
     pub fn normalized(self) -> Self {
@@ -102,6 +112,12 @@ pub enum Action {
     Open,
     /// Go to the parent directory.
     GoUp,
+    /// Go back in the active pane's history.
+    GoBack,
+    /// Go forward in the active pane's history.
+    GoForward,
+    /// Edit the active pane's location.
+    EditLocation,
     /// Make the other pane active.
     SwitchPane,
     /// Re-read the active pane's directory.
@@ -138,6 +154,9 @@ impl Keymap {
         map.bind(KeyChord::shift(Key::Tab), SwitchPane);
         map.bind(KeyChord::ctrl(Key::PageUp), GoUp);
         map.bind(KeyChord::ctrl(Key::Char('r')), Refresh);
+        map.bind(KeyChord::alt(Key::Left), GoBack);
+        map.bind(KeyChord::alt(Key::Right), GoForward);
+        map.bind(KeyChord::ctrl(Key::Char('l')), EditLocation);
         map.bind(KeyChord::ctrl(Key::F(3)), SortBy(SortKey::Name));
         map.bind(KeyChord::ctrl(Key::F(4)), SortBy(SortKey::Extension));
         map.bind(KeyChord::ctrl(Key::F(5)), SortBy(SortKey::Modified));
@@ -172,6 +191,21 @@ mod tests {
             Some(Action::SortBy(SortKey::Size))
         );
         assert_eq!(map.lookup(KeyChord::plain(Key::F(6))), None);
+    }
+
+    #[test]
+    fn navigation_bindings() {
+        let map = Keymap::commander_defaults();
+        assert_eq!(map.lookup(KeyChord::alt(Key::Left)), Some(Action::GoBack));
+        assert_eq!(
+            map.lookup(KeyChord::alt(Key::Right)),
+            Some(Action::GoForward)
+        );
+        assert_eq!(
+            map.lookup(KeyChord::ctrl(Key::Char('L'))),
+            Some(Action::EditLocation)
+        );
+        assert_eq!(map.lookup(KeyChord::plain(Key::Left)), None);
     }
 
     #[test]

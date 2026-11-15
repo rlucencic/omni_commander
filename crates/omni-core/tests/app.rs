@@ -179,6 +179,50 @@ async fn sorting_and_refresh_keep_the_cursor_entry() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn typed_locations_and_history() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("a").join("deep")).unwrap();
+    std::fs::write(dir.path().join("a").join("file.txt"), b"x").unwrap();
+
+    let mut h = start(Arc::new(LocalFs), dir.path(), dir.path());
+    let _ = h.listing(PaneId::Left).await;
+
+    // Relative input, resolved against the current directory.
+    h.handle.send(Command::NavigateToInput {
+        pane: PaneId::Left,
+        input: "a/deep".into(),
+    });
+    assert_eq!(
+        h.listing(PaneId::Left).await.location,
+        dir.path().join("a").join("deep")
+    );
+
+    // A file path shows its directory with the file under the cursor.
+    let file = dir.path().join("a").join("file.txt");
+    h.handle.send(Command::NavigateToInput {
+        pane: PaneId::Left,
+        input: file.display().to_string(),
+    });
+    let shown = h.listing(PaneId::Left).await;
+    assert_eq!(shown.location, dir.path().join("a"));
+    assert_eq!(row_name(&shown.listing, shown.cursor), "file.txt");
+
+    // Back twice returns to the start; forward goes to a/deep again.
+    h.handle.send(Command::GoBack { pane: PaneId::Left });
+    assert_eq!(
+        h.listing(PaneId::Left).await.location,
+        dir.path().join("a").join("deep")
+    );
+    h.handle.send(Command::GoBack { pane: PaneId::Left });
+    assert_eq!(h.listing(PaneId::Left).await.location, dir.path());
+    h.handle.send(Command::GoForward { pane: PaneId::Left });
+    assert_eq!(
+        h.listing(PaneId::Left).await.location,
+        dir.path().join("a").join("deep")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn navigation_errors_are_reported_and_the_pane_stays_put() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = start(Arc::new(LocalFs), dir.path(), dir.path());
