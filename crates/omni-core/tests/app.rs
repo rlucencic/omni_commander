@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use omni_core::app::{self, AppConfig, AppHandle, Command, PaneConfig, PaneId, Update};
+use omni_core::pane::SelectionChange;
 use omni_core::{Listing, Row, SortKey, SortSpec};
 use omni_vfs::{
     Capabilities, DirEvent, DirStream, Entry, EntryKind, FileSystem, LocalFs, dir_stream,
@@ -220,6 +221,65 @@ async fn typed_locations_and_history() {
         h.listing(PaneId::Left).await.location,
         dir.path().join("a").join("deep")
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn selection_and_filter_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["a.txt", "b.txt", "c.rs"] {
+        std::fs::write(dir.path().join(name), b"12345").unwrap();
+    }
+    let mut h = start(Arc::new(LocalFs), dir.path(), dir.path());
+    let shown = h.listing(PaneId::Left).await;
+
+    h.handle.send(Command::ToggleSelection {
+        pane: PaneId::Left,
+        snapshot: shown.listing.id(),
+        row: 1,
+    });
+    let (selection, status) = loop {
+        if let Update::Selection {
+            pane: PaneId::Left,
+            selection,
+            change,
+            snapshot,
+        } = h.next().await
+        {
+            assert_eq!(snapshot, shown.listing.id());
+            assert_eq!(change, SelectionChange::Rows(vec![1]));
+            let Update::Status { status, .. } = h.next().await else {
+                panic!("status follows")
+            };
+            break (selection, status);
+        }
+    };
+    assert_eq!(selection.len(), 1);
+    assert_eq!(status.selection.files, 1);
+    assert_eq!(status.selection.bytes, 5);
+
+    // Filtering publishes a new listing that carries the (reduced) selection.
+    h.handle.send(Command::SetFilter {
+        pane: PaneId::Left,
+        text: "*.rs".into(),
+    });
+    loop {
+        if let Update::Listing {
+            pane: PaneId::Left,
+            listing,
+            selection,
+            cursor,
+            ..
+        } = h.next().await
+        {
+            assert_eq!(listing.entry_count(), 1);
+            assert_eq!(row_name(&listing, cursor), "c.rs");
+            assert!(
+                selection.is_empty(),
+                "a.txt is hidden, so it was deselected"
+            );
+            break;
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

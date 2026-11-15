@@ -8,6 +8,8 @@ use std::cell::RefCell;
 use std::sync::Arc;
 
 use omni_core::format::{TimeFormatter, format_attributes, format_size};
+use omni_core::pane::SelectionChange;
+use omni_core::selection::Selection;
 use omni_core::sort::split_extension;
 use omni_core::{Listing, Row, SnapshotId, SortSpec};
 use omni_vfs::{EntryKind, LinkTarget};
@@ -17,6 +19,7 @@ use crate::{EntryIcon, FileRow};
 
 pub struct RowsModel {
     listing: RefCell<Arc<Listing>>,
+    selection: RefCell<Arc<Selection>>,
     time: TimeFormatter,
     notify: ModelNotify,
 }
@@ -29,16 +32,45 @@ impl RowsModel {
                 SortSpec::default(),
                 false,
             ))),
+            selection: RefCell::new(Arc::new(Selection::default())),
             time,
             notify: ModelNotify::default(),
         }
     }
 
-    /// Replaces all rows with `listing`.
-    pub fn set_listing(&self, listing: Arc<Listing>) {
-        // The borrow must end before `reset`, which may call back into us.
+    /// Replaces all rows with `listing` and its `selection`.
+    pub fn set_listing(&self, listing: Arc<Listing>, selection: Arc<Selection>) {
+        // The borrows must end before `reset`, which may call back into us.
         *self.listing.borrow_mut() = listing;
+        *self.selection.borrow_mut() = selection;
         self.notify.reset();
+    }
+
+    /// Updates the selection of the displayed listing `snapshot`. Updates
+    /// for another listing are stale and ignored.
+    pub fn set_selection(
+        &self,
+        snapshot: SnapshotId,
+        selection: Arc<Selection>,
+        change: &SelectionChange,
+    ) {
+        if snapshot != self.snapshot() {
+            return;
+        }
+        *self.selection.borrow_mut() = selection;
+        match change {
+            SelectionChange::Rows(rows) => {
+                for &row in rows {
+                    self.notify.row_changed(row);
+                }
+            }
+            SelectionChange::All => {
+                let rows = self.row_count();
+                for row in 0..rows {
+                    self.notify.row_changed(row);
+                }
+            }
+        }
     }
 
     /// Id of the snapshot currently displayed; rows reported back to the
@@ -47,7 +79,7 @@ impl RowsModel {
         self.listing.borrow().id()
     }
 
-    fn file_row(&self, row: Row<'_>) -> FileRow {
+    fn file_row(&self, row: Row<'_>, selected: bool) -> FileRow {
         let entry = match row {
             Row::Parent => {
                 return FileRow {
@@ -91,6 +123,7 @@ impl RowsModel {
             attributes: format_attributes(&entry.attributes).into(),
             icon,
             hidden: entry.attributes.hidden,
+            selected,
         }
     }
 }
@@ -104,7 +137,10 @@ impl Model for RowsModel {
 
     fn row_data(&self, row: usize) -> Option<FileRow> {
         let listing = self.listing.borrow();
-        listing.row(row).map(|row| self.file_row(row))
+        let selected = listing
+            .entry_index(row)
+            .is_some_and(|index| self.selection.borrow().contains(index));
+        listing.row(row).map(|row| self.file_row(row, selected))
     }
 
     fn model_tracker(&self) -> &dyn ModelTracker {

@@ -102,12 +102,22 @@ impl KeyChord {
 /// Something the user can trigger from the keyboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Action {
-    CursorUp,
-    CursorDown,
-    CursorPageUp,
-    CursorPageDown,
-    CursorFirst,
-    CursorLast,
+    /// Move the cursor.
+    Move(Motion),
+    /// Move the cursor, selecting the range from where this run of
+    /// selecting moves started.
+    Select(Motion),
+    /// Toggle the selection of the entry under the cursor; with `advance`,
+    /// also move the cursor down.
+    ToggleSelection {
+        advance: bool,
+    },
+    SelectAll,
+    DeselectAll,
+    /// Open (or focus) the quick filter.
+    Filter,
+    /// Remove the quick filter.
+    ClearFilter,
     /// Enter the directory under the cursor.
     Open,
     /// Go to the parent directory.
@@ -126,6 +136,17 @@ pub enum Action {
     SortBy(SortKey),
 }
 
+/// A cursor movement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Motion {
+    Up,
+    Down,
+    PageUp,
+    PageDown,
+    First,
+    Last,
+}
+
 /// Maps key chords to actions.
 #[derive(Debug, Clone, Default)]
 pub struct Keymap {
@@ -137,20 +158,42 @@ impl Keymap {
     pub fn commander_defaults() -> Self {
         use Action::*;
         let mut map = Self::default();
+        let motions = [
+            (Key::Up, Motion::Up),
+            (Key::Down, Motion::Down),
+            (Key::PageUp, Motion::PageUp),
+            (Key::PageDown, Motion::PageDown),
+            (Key::Home, Motion::First),
+            (Key::End, Motion::Last),
+        ];
+        for (key, motion) in motions {
+            map.bind(KeyChord::plain(key), Move(motion));
+            map.bind(KeyChord::shift(key), Select(motion));
+        }
         let plain = [
-            (Key::Up, CursorUp),
-            (Key::Down, CursorDown),
-            (Key::PageUp, CursorPageUp),
-            (Key::PageDown, CursorPageDown),
-            (Key::Home, CursorFirst),
-            (Key::End, CursorLast),
             (Key::Enter, Open),
             (Key::Backspace, GoUp),
             (Key::Tab, SwitchPane),
+            (Key::Insert, ToggleSelection { advance: true }),
+            (Key::Space, ToggleSelection { advance: false }),
+            (Key::Escape, ClearFilter),
         ];
         for (key, action) in plain {
             map.bind(KeyChord::plain(key), action);
         }
+        map.bind(KeyChord::ctrl(Key::Char('a')), SelectAll);
+        map.bind(
+            KeyChord {
+                key: Key::Char('a'),
+                mods: Modifiers {
+                    ctrl: true,
+                    shift: true,
+                    ..Modifiers::default()
+                },
+            },
+            DeselectAll,
+        );
+        map.bind(KeyChord::ctrl(Key::Char('f')), Filter);
         map.bind(KeyChord::shift(Key::Tab), SwitchPane);
         map.bind(KeyChord::ctrl(Key::PageUp), GoUp);
         map.bind(KeyChord::ctrl(Key::Char('r')), Refresh);
@@ -206,6 +249,36 @@ mod tests {
             Some(Action::EditLocation)
         );
         assert_eq!(map.lookup(KeyChord::plain(Key::Left)), None);
+    }
+
+    #[test]
+    fn selection_bindings() {
+        let map = Keymap::commander_defaults();
+        assert_eq!(
+            map.lookup(KeyChord::plain(Key::Down)),
+            Some(Action::Move(Motion::Down))
+        );
+        assert_eq!(
+            map.lookup(KeyChord::shift(Key::End)),
+            Some(Action::Select(Motion::Last))
+        );
+        assert_eq!(
+            map.lookup(KeyChord::plain(Key::Insert)),
+            Some(Action::ToggleSelection { advance: true })
+        );
+        assert_eq!(
+            map.lookup(KeyChord::ctrl(Key::Char('a'))),
+            Some(Action::SelectAll)
+        );
+        let ctrl_shift_a = KeyChord {
+            key: Key::Char('A'),
+            mods: Modifiers {
+                ctrl: true,
+                shift: true,
+                ..Modifiers::default()
+            },
+        };
+        assert_eq!(map.lookup(ctrl_shift_a), Some(Action::DeselectAll));
     }
 
     #[test]

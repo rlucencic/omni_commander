@@ -15,6 +15,7 @@ export struct FileRow {
     attributes: string,
     icon: EntryIcon,
     hidden: bool,
+    selected: bool,
 }
 
 /// Everything about a pane except its rows.
@@ -24,7 +25,12 @@ export struct PaneInfo {
     crumbs: [string],
     can-go-back: bool,
     can-go-forward: bool,
+    /// Counts of the shown rows (and how many a filter hides).
     summary: string,
+    /// What is selected; empty when nothing is.
+    selection: string,
+    /// Text of the active quick filter; empty when none.
+    filter: string,
     /// Non-empty while a directory is loading.
     loading: string,
     message: string,

@@ -44,10 +44,10 @@ Delivered in slices, each tested before the next:
    - [x] Back/forward history per pane, restoring the cursor (Alt+←/→, mouse buttons)
    - [x] Breadcrumbs with back/forward/up buttons
    - [x] Editable location (Ctrl+L): `~`, relative paths, file paths open their folder
-2. Selection and filtering
-   - [ ] Multi-selection: Insert, Space, Shift+arrows, Ctrl+A, Ctrl/Shift+click
-   - [ ] Selection summary in the status line
-   - [ ] Quick filter
+2. Selection and filtering ✅
+   - [x] Multi-selection: Insert, Space, Shift+arrows, Ctrl+A, Ctrl/Shift+click
+   - [x] Selection summary in the status line
+   - [x] Quick filter: type to filter, wildcards, `;` alternatives
 3. Tabs
    - [ ] Per-pane tabs: Ctrl+T, Ctrl+W, Ctrl+Tab, tab bar
 4. Settings
@@ -56,6 +56,10 @@ Delivered in slices, each tested before the next:
    - [ ] Configurable shortcuts
    - [ ] Light/dark/system theme, renderer choice, hidden-file toggle
    - [ ] Automatic refresh with `notify`
+
+Known limitations of slice 2: changing the filter deselects entries it hides, and they
+stay deselected when the filter is removed (deliberate: no invisible selection). There is
+no invert-selection or select-by-pattern command yet.
 
 Known limitations of slice 1: breadcrumbs are cut off on the left without an
 ellipsis, and editing the text of a path whose name is not valid UTF-8 cannot reproduce

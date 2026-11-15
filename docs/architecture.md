@@ -91,6 +91,30 @@ quotes, `~`, relative paths, and lexical `..` handling like a shell's `cd`. The 
 not check in advance whether the target is a file. If listing fails with "not a directory",
 it shows the parent with the file under the cursor. Breadcrumbs come from the same module.
 
+### Selection and quick filter
+
+Both live in `PaneState`, so they are testable without a GUI and available to the file
+operations of Milestone 3.
+
+- **Bit set by entry index.** The selection (`omni_core::selection::Selection`) indexes the
+  directory's entries. Entry indices are shared by every re-sorted or filtered `Listing`,
+  so sorting and filtering never have to translate it.
+- **Refresh and navigation.** A refresh of the same directory carries the selection over
+  by name; a different directory starts empty.
+- **Filtered views.** A filter produces a new `Listing` over the same entries and keys,
+  with a subset of the order. `PaneState` keeps the unfiltered listing (`full`) next to
+  the shown one, so changing the filter never re-reads or re-sorts.
+- **Hidden means deselected.** Entries hidden by a filter are deselected, so an action on
+  the selection can never touch files that are not visible.
+- **Shift ranges.** A range has an anchor. The selection that existed when the range
+  started is kept as its base, and each step selects base ∪ [anchor, cursor], so going
+  back shrinks the range again. The UI tracks where a run of Shift movements started; the
+  core does the selecting.
+- **Sending changes to the UI.** `Update::Selection` names the changed rows; above 1024
+  rows it says "all". The row model then notifies just those rows (not a model reset),
+  so the scroll position is kept. Selecting all 100 000 entries of the test directory
+  updates the UI in well under a second in a debug build.
+
 ### Rendering large listings
 
 The Slint model (`RowsModel`) wraps the current `Arc<Listing>` and formats rows lazily

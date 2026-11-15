@@ -5,15 +5,18 @@
 //! directory enumeration) and what changed (listing, status). The async
 //! [`crate::app`] actor drives it; tests drive it directly.
 
-use std::ffi::OsString;
+use std::collections::HashSet;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use omni_vfs::{DirEvent, Entry, FileSystem, VfsError, child_path};
 
+use crate::filter::Filter;
 use crate::listing::{Listing, Row, SnapshotId};
 use crate::location;
+use crate::selection::{Selection, SelectionSummary};
 use crate::sort::{SortKey, SortSpec};
 
 /// Minimum time between progress updates while a directory is loading.
@@ -28,6 +31,9 @@ const PARTIAL_INTERVAL: Duration = Duration::from_secs(1);
 const PARTIAL_COST_FACTOR: u32 = 10;
 /// Locations remembered in each direction of the navigation history.
 const HISTORY_LIMIT: usize = 100;
+/// Selection changes touching more rows than this are reported as "all
+/// rows changed" rather than row by row.
+const MAX_CHANGED_ROWS: usize = 1024;
 
 /// Identifies one directory enumeration of one pane. Events carrying an
 /// outdated token are ignored.
@@ -51,6 +57,26 @@ pub struct Changes {
     pub listing: Option<usize>,
     /// [`PaneState::status`] changed.
     pub status: bool,
+    /// The selection changed (and the listing did not; a new listing always
+    /// comes with the current selection).
+    pub selection: Option<SelectionChange>,
+}
+
+/// Which rows' selection state may have changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelectionChange {
+    Rows(Vec<usize>),
+    All,
+}
+
+impl SelectionChange {
+    fn rows(rows: impl ExactSizeIterator<Item = usize>) -> Self {
+        if rows.len() > MAX_CHANGED_ROWS {
+            Self::All
+        } else {
+            Self::Rows(rows.collect())
+        }
+    }
 }
 
 impl Changes {
@@ -83,6 +109,9 @@ pub struct PaneStatus {
     pub loading: Option<Loading>,
     pub message: Option<Message>,
     pub history: HistoryState,
+    pub selection: SelectionSummary,
+    /// Text of the active quick filter; empty if none.
+    pub filter: String,
 }
 
 /// Whether the pane can go back or forward in its navigation history.
@@ -161,12 +190,29 @@ struct Load {
     warnings: Vec<String>,
 }
 
+/// A Shift-selection in progress: the rows between `anchor` and the cursor
+/// are selected on top of what was selected before it started (`base`).
+#[derive(Debug)]
+struct RangeSelect {
+    anchor: usize,
+    base: Selection,
+    /// Rows selected by the previous step of this range, inclusive.
+    span: (usize, usize),
+}
+
 /// One file pane: a location on a filesystem, its listing, and loading state.
 #[derive(Debug)]
 pub struct PaneState {
     fs: Arc<dyn FileSystem>,
     location: PathBuf,
+    /// Every entry of the location, sorted.
+    full: Arc<Listing>,
+    /// What is shown: `full`, or `full` narrowed by `filter`.
     listing: Arc<Listing>,
+    filter: Option<Filter>,
+    /// Indexed by entry index, so it applies to `full` and `listing` alike.
+    selection: Arc<Selection>,
+    range: Option<RangeSelect>,
     sort: SortSpec,
     focus: Focus,
     load: Option<Load>,
@@ -182,10 +228,15 @@ impl PaneState {
     /// Creates a pane and requests the initial enumeration of `path`.
     pub fn new(fs: Arc<dyn FileSystem>, path: PathBuf, sort: SortSpec) -> (Self, Changes) {
         let has_parent = path.parent().is_some();
+        let empty = Arc::new(Listing::new(Vec::new(), sort, has_parent));
         let mut pane = Self {
             fs,
             location: path.clone(),
-            listing: Arc::new(Listing::new(Vec::new(), sort, has_parent)),
+            full: Arc::clone(&empty),
+            listing: empty,
+            filter: None,
+            selection: Arc::new(Selection::new(0)),
+            range: None,
             sort,
             focus: Focus::top(),
             load: None,
@@ -216,6 +267,11 @@ impl PaneState {
         self.sort
     }
 
+    /// Selected entries, by entry index of [`Self::listing`].
+    pub fn selection(&self) -> &Arc<Selection> {
+        &self.selection
+    }
+
     pub fn status(&self) -> PaneStatus {
         PaneStatus {
             loading: self.load.as_ref().map(|load| Loading {
@@ -227,6 +283,12 @@ impl PaneState {
                 can_go_back: !self.back.is_empty(),
                 can_go_forward: !self.forward.is_empty(),
             },
+            selection: SelectionSummary::of(&self.selection, self.full.entries()),
+            filter: self
+                .filter
+                .as_ref()
+                .map(|f| f.text().to_string())
+                .unwrap_or_default(),
         }
     }
 
@@ -332,11 +394,110 @@ impl PaneState {
     /// Sorts by `key` (reversing the direction if it is already the key).
     pub fn sort_by(&mut self, key: SortKey) -> Changes {
         self.sort = self.sort.toggled(key);
-        self.listing = Arc::new(self.listing.resorted(self.sort));
+        self.full = Arc::new(self.full.resorted(self.sort));
+        self.listing = self.apply_filter();
+        self.range = None;
         Changes {
             listing: Some(self.place_cursor()),
             ..Changes::default()
         }
+    }
+
+    /// Shows only entries matching `text` (see [`Filter`]); blank text shows
+    /// everything. Entries hidden by the filter are deselected, so actions on
+    /// the selection never touch files the user cannot see.
+    pub fn set_filter(&mut self, text: &str) -> Changes {
+        let filter = Filter::new(text);
+        if filter == self.filter {
+            return Changes::default();
+        }
+        self.filter = filter;
+        self.listing = self.apply_filter();
+        self.deselect_hidden();
+        self.range = None;
+        // Stay on the current entry if it is still shown, otherwise go to
+        // the first match (not `..`).
+        let focused_visible = self
+            .focus
+            .name
+            .as_deref()
+            .is_some_and(|name| self.listing.find(name).is_some());
+        if !focused_visible {
+            self.focus = Focus {
+                name: None,
+                row: self.listing.first_entry_row(),
+            };
+        }
+        Changes {
+            listing: Some(self.place_cursor()),
+            status: true,
+            ..Changes::default()
+        }
+    }
+
+    /// Toggles the selection of the entry in `row` (never the `..` row).
+    pub fn toggle_selection(&mut self, snapshot: SnapshotId, row: usize) -> Changes {
+        if snapshot != self.listing.id() {
+            return Changes::default();
+        }
+        let Some(index) = self.listing.entry_index(row) else {
+            return Changes::default();
+        };
+        Arc::make_mut(&mut self.selection).toggle(index);
+        self.range = None;
+        selection_changes(SelectionChange::Rows(vec![row]))
+    }
+
+    /// Shift-selection: selects the rows between `anchor` and `row` on top of
+    /// the selection that existed when this range started. Repeated calls
+    /// with the same anchor grow or shrink the range.
+    pub fn select_range(&mut self, snapshot: SnapshotId, anchor: usize, row: usize) -> Changes {
+        if snapshot != self.listing.id() || self.listing.is_empty() {
+            return Changes::default();
+        }
+        let last = self.listing.len() - 1;
+        let (lo, hi) = (anchor.min(row).min(last), anchor.max(row).min(last));
+        let (base, previous) = match self.range.take() {
+            Some(range) if range.anchor == anchor => (range.base, Some(range.span)),
+            _ => ((*self.selection).clone(), None),
+        };
+        let mut selection = base.clone();
+        for r in lo..=hi {
+            if let Some(index) = self.listing.entry_index(r) {
+                selection.set(index, true);
+            }
+        }
+        let (from, to) = previous.map_or((lo, hi), |(a, b)| (a.min(lo), b.max(hi)));
+        self.selection = Arc::new(selection);
+        self.range = Some(RangeSelect {
+            anchor,
+            base,
+            span: (lo, hi),
+        });
+        selection_changes(SelectionChange::rows(from..to + 1))
+    }
+
+    /// Selects every shown entry.
+    pub fn select_all(&mut self) -> Changes {
+        let mut selection = Selection::new(self.full.entries().len());
+        for &index in self.listing.visible() {
+            selection.set(index, true);
+        }
+        self.range = None;
+        if selection == *self.selection {
+            return Changes::default();
+        }
+        self.selection = Arc::new(selection);
+        selection_changes(SelectionChange::All)
+    }
+
+    pub fn deselect_all(&mut self) -> Changes {
+        self.range = None;
+        if self.selection.is_empty() {
+            return Changes::default();
+        }
+        Arc::make_mut(&mut self.selection).clear();
+        selection_changes(SelectionChange::All)
     }
 
     /// Feeds one event of the enumeration identified by `token`.
@@ -398,9 +559,11 @@ impl PaneState {
                 if !self.settled && !load.partial_shown {
                     // Nothing was ever shown: show the failed location empty so
                     // the user can still navigate up from it.
-                    self.location = load.path;
-                    let has_parent = self.location.parent().is_some();
-                    self.listing = Arc::new(Listing::new(Vec::new(), self.sort, has_parent));
+                    let has_parent = load.path.parent().is_some();
+                    self.replace_listing(
+                        load.path,
+                        Listing::new(Vec::new(), self.sort, has_parent),
+                    );
                     changes.listing = Some(0);
                 }
                 self.settled = true;
@@ -476,12 +639,58 @@ impl PaneState {
             self.focus = focus;
         }
         let has_parent = path.parent().is_some();
-        self.location = path;
-        self.listing = Arc::new(Listing::new(entries, self.sort, has_parent));
+        self.replace_listing(path, Listing::new(entries, self.sort, has_parent));
         Changes {
             listing: Some(self.place_cursor()),
             status: true,
-            load: None,
+            ..Changes::default()
+        }
+    }
+
+    /// Installs a new listing of `path`. For the same location (a refresh)
+    /// the selection follows entry names and the filter stays; a different
+    /// location starts unfiltered with nothing selected.
+    fn replace_listing(&mut self, path: PathBuf, full: Listing) {
+        let selection = if path == self.location {
+            remap_selection(&self.full, &self.selection, &full)
+        } else {
+            self.filter = None;
+            Selection::new(full.entries().len())
+        };
+        self.location = path;
+        self.full = Arc::new(full);
+        self.listing = self.apply_filter();
+        self.selection = Arc::new(selection);
+        self.deselect_hidden();
+        self.range = None;
+    }
+
+    fn apply_filter(&self) -> Arc<Listing> {
+        match &self.filter {
+            Some(filter) => Arc::new(self.full.filtered(filter)),
+            None => Arc::clone(&self.full),
+        }
+    }
+
+    /// Deselects entries the filter hides.
+    fn deselect_hidden(&mut self) {
+        if self.filter.is_none() || self.selection.is_empty() {
+            return;
+        }
+        let mut visible = Selection::new(self.full.entries().len());
+        for &index in self.listing.visible() {
+            visible.set(index, true);
+        }
+        let hidden: Vec<u32> = self
+            .selection
+            .iter()
+            .filter(|&i| !visible.contains(i))
+            .collect();
+        if !hidden.is_empty() {
+            let selection = Arc::make_mut(&mut self.selection);
+            for index in hidden {
+                selection.set(index, false);
+            }
         }
     }
 
@@ -522,6 +731,33 @@ impl PaneState {
         self.message = Some(Message { level, text });
         Changes::status()
     }
+}
+
+fn selection_changes(change: SelectionChange) -> Changes {
+    Changes {
+        selection: Some(change),
+        status: true,
+        ..Changes::default()
+    }
+}
+
+/// Carries a selection over to a new listing of the same directory, by name.
+fn remap_selection(old: &Listing, selection: &Selection, new: &Listing) -> Selection {
+    let mut remapped = Selection::new(new.entries().len());
+    if selection.is_empty() {
+        return remapped;
+    }
+    let names: HashSet<&OsStr> = selection
+        .iter()
+        .filter_map(|i| old.entries().get(i as usize))
+        .map(|entry| entry.name.as_os_str())
+        .collect();
+    for (i, entry) in new.entries().iter().enumerate() {
+        if names.contains(entry.name.as_os_str()) {
+            remapped.set(i as u32, true);
+        }
+    }
+    remapped
 }
 
 /// Moves `depth` steps from the `from` stack to the `to` stack: the location
@@ -1011,5 +1247,178 @@ mod tests {
         let changes = pane.on_dir_event(req.token, DirEvent::Failed(err), Instant::now());
         assert_eq!(changes.load, None);
         assert_eq!(pane.status().message.unwrap().level, Level::Error);
+    }
+
+    fn selected_names(pane: &PaneState) -> Vec<String> {
+        let entries = pane.listing().entries();
+        let mut names: Vec<String> = pane
+            .selection()
+            .iter()
+            .map(|i| entries[i as usize].name.to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn sized(name: &str, size: u64) -> Entry {
+        let mut entry = file(name);
+        entry.size = Some(size);
+        entry
+    }
+
+    #[test]
+    fn toggling_selects_entries_but_not_the_parent_row() {
+        let mut pane = loaded_pane(vec![dir("d"), sized("a", 10), sized("b", 5)]);
+        let id = pane.listing().id();
+        assert_eq!(
+            pane.toggle_selection(id, 0),
+            Changes::default(),
+            "'..' is not selectable"
+        );
+        let changes = pane.toggle_selection(id, 2);
+        assert_eq!(changes.selection, Some(SelectionChange::Rows(vec![2])));
+        assert!(changes.status);
+        let _ = pane.toggle_selection(id, 1);
+        assert_eq!(selected_names(&pane), ["a", "d"]);
+        let summary = pane.status().selection;
+        assert_eq!(
+            summary,
+            SelectionSummary {
+                dirs: 1,
+                files: 1,
+                bytes: 10
+            }
+        );
+
+        let _ = pane.toggle_selection(id, 2);
+        assert_eq!(selected_names(&pane), ["d"]);
+        let stale = pane.listing().id();
+        let _ = pane.sort_by(SortKey::Size);
+        assert_eq!(
+            pane.toggle_selection(stale, 1),
+            Changes::default(),
+            "outdated snapshot"
+        );
+    }
+
+    #[test]
+    fn range_selection_grows_and_shrinks_on_top_of_earlier_selection() {
+        let mut pane = loaded_pane((0..6).map(|i| file(&format!("f{i}"))).collect());
+        let id = pane.listing().id();
+        let _ = pane.toggle_selection(id, 6); // f5, selected before the range
+        let changes = pane.select_range(id, 2, 4); // f1..f3
+        assert_eq!(
+            changes.selection,
+            Some(SelectionChange::Rows(vec![2, 3, 4]))
+        );
+        assert_eq!(selected_names(&pane), ["f1", "f2", "f3", "f5"]);
+
+        // Same anchor, shorter range: f3 is released, f5 stays.
+        let changes = pane.select_range(id, 2, 3);
+        assert_eq!(
+            changes.selection,
+            Some(SelectionChange::Rows(vec![2, 3, 4]))
+        );
+        assert_eq!(selected_names(&pane), ["f1", "f2", "f5"]);
+
+        // Upwards past the anchor, including the `..` row which is skipped.
+        let _ = pane.select_range(id, 2, 0);
+        assert_eq!(selected_names(&pane), ["f0", "f1", "f5"]);
+    }
+
+    #[test]
+    fn select_all_and_deselect_all() {
+        let mut pane = loaded_pane(vec![dir("d"), file("a"), file("b")]);
+        let changes = pane.select_all();
+        assert_eq!(changes.selection, Some(SelectionChange::All));
+        assert_eq!(selected_names(&pane), ["a", "b", "d"]);
+        assert_eq!(pane.select_all(), Changes::default(), "nothing changed");
+        let _ = pane.deselect_all();
+        assert!(pane.selection().is_empty());
+        assert_eq!(pane.deselect_all(), Changes::default());
+    }
+
+    #[test]
+    fn filter_narrows_rows_and_moves_cursor_to_the_first_match() {
+        let mut pane = loaded_pane(vec![
+            dir("docs"),
+            file("a.txt"),
+            file("b.rs"),
+            file("c.txt"),
+        ]);
+        let changes = pane.set_filter("*.txt");
+        assert_eq!(
+            (0..pane.listing().len())
+                .map(|r| row_name(&pane, r))
+                .collect::<Vec<_>>(),
+            ["..", "a.txt", "c.txt"]
+        );
+        assert_eq!(changes.listing, Some(1), "first match, not '..'");
+        assert_eq!(pane.status().filter, "*.txt");
+        assert_eq!(pane.set_filter("*.txt"), Changes::default());
+
+        // The cursor stays on its entry while it remains visible.
+        pane.cursor_moved(pane.listing().id(), 2); // c.txt
+        let changes = pane.set_filter("c.t");
+        assert_eq!(changes.listing, Some(1));
+        assert_eq!(row_name(&pane, 1), "c.txt");
+
+        let changes = pane.set_filter("");
+        assert_eq!(pane.listing().entry_count(), 4);
+        assert_eq!(row_name(&pane, changes.listing.unwrap()), "c.txt");
+        assert_eq!(pane.status().filter, "");
+    }
+
+    #[test]
+    fn filtering_deselects_hidden_entries_and_select_all_respects_it() {
+        let mut pane = loaded_pane(vec![file("a.txt"), file("b.rs")]);
+        let _ = pane.select_all();
+        let _ = pane.set_filter("*.txt");
+        assert_eq!(
+            selected_names(&pane),
+            ["a.txt"],
+            "b.rs is hidden, so deselected"
+        );
+        let _ = pane.set_filter("");
+        let _ = pane.set_filter("*.rs");
+        let _ = pane.select_all();
+        assert_eq!(selected_names(&pane), ["b.rs"]);
+    }
+
+    #[test]
+    fn sorting_keeps_the_selection() {
+        let mut pane = loaded_pane(vec![sized("big", 100), sized("small", 1)]);
+        let _ = pane.toggle_selection(pane.listing().id(), 1); // big
+        let _ = pane.sort_by(SortKey::Size);
+        let _ = pane.sort_by(SortKey::Size); // ascending: small, big
+        assert_eq!(selected_names(&pane), ["big"]);
+        assert_eq!(
+            pane.listing().entry_index(2),
+            pane.selection().iter().next()
+        );
+    }
+
+    #[test]
+    fn refresh_keeps_selection_and_filter_but_navigation_clears_them() {
+        let mut pane = loaded_pane(vec![file("a.txt"), file("b.txt"), file("c.rs")]);
+        let _ = pane.set_filter("txt");
+        let _ = pane.toggle_selection(pane.listing().id(), 2); // b.txt
+
+        // Refresh: entries arrive in a different order, plus a new one.
+        let changes = pane.refresh();
+        let _ = arrive(
+            &mut pane,
+            changes,
+            vec![file("new.txt"), file("c.rs"), file("b.txt"), file("a.txt")],
+        );
+        assert_eq!(selected_names(&pane), ["b.txt"]);
+        assert_eq!(pane.status().filter, "txt");
+        assert_eq!(pane.listing().entry_count(), 3);
+
+        let changes = pane.navigate(home().join("elsewhere"));
+        let _ = arrive(&mut pane, changes, vec![file("b.txt"), file("z.rs")]);
+        assert!(pane.selection().is_empty());
+        assert_eq!(pane.status().filter, "");
+        assert_eq!(pane.listing().entry_count(), 2);
     }
 }

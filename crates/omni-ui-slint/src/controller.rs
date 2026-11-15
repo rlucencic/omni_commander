@@ -9,11 +9,12 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use omni_core::app::{AppHandle, Command, PaneId, Update};
-use omni_core::format::{TimeFormatter, format_count, format_totals};
-use omni_core::keymap::{Action, Keymap, Modifiers};
+use omni_core::format::{TimeFormatter, format_count, format_size, format_totals};
+use omni_core::keymap::{Action, Key, Keymap, Modifiers, Motion};
 use omni_core::location::breadcrumbs;
 use omni_core::pane::{Level, PaneStatus};
-use omni_core::{SortKey, SortSpec};
+use omni_core::selection::SelectionSummary;
+use omni_core::{Listing, SortKey, SortSpec};
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 use tokio::sync::mpsc;
 
@@ -26,6 +27,8 @@ struct PaneView {
     location: RefCell<Option<PathBuf>>,
     /// Targets of the breadcrumbs currently shown, in display order.
     crumb_paths: RefCell<Vec<PathBuf>>,
+    /// Row where the current run of Shift-selection started.
+    anchor: Cell<Option<usize>>,
 }
 
 pub struct Controller {
@@ -45,6 +48,7 @@ impl Controller {
             rows: Rc::new(RowsModel::new(time.clone())),
             location: RefCell::new(None),
             crumb_paths: RefCell::new(Vec::new()),
+            anchor: Cell::new(None),
         };
         let controller = Rc::new(Self {
             window: window.as_weak(),
@@ -59,15 +63,13 @@ impl Controller {
 
         let c = Rc::clone(&controller);
         window.on_key_pressed(move |text, control, alt, shift, meta| {
-            c.on_key(
-                &text,
-                Modifiers {
-                    ctrl: control,
-                    alt,
-                    shift,
-                    meta,
-                },
-            )
+            let mods = Modifiers {
+                ctrl: control,
+                alt,
+                shift,
+                meta,
+            };
+            c.on_key(&text, mods)
         });
         let c = Rc::clone(&controller);
         window.on_cursor_changed(move |pane, row| {
@@ -93,7 +95,8 @@ impl Controller {
         let c = Rc::clone(&controller);
         window.on_crumb_clicked(move |pane, index| {
             let pane = pane_id(pane);
-            let target = c.panes[pane.index()]
+            let target = c
+                .view(pane)
                 .crumb_paths
                 .borrow()
                 .get(to_row(index))
@@ -127,6 +130,17 @@ impl Controller {
                 pane: pane_id(pane),
             })
         });
+        let c = Rc::clone(&controller);
+        window.on_row_pressed(move |pane, row, control, shift| {
+            c.row_pressed(pane_id(pane), to_row(row), control, shift);
+        });
+        let c = Rc::clone(&controller);
+        window.on_filter_edited(move |pane, text| {
+            c.app.send(Command::SetFilter {
+                pane: pane_id(pane),
+                text: text.into(),
+            });
+        });
 
         controller
     }
@@ -152,11 +166,13 @@ impl Controller {
                 listing,
                 sort,
                 cursor,
+                selection,
             } => {
-                let view = &self.panes[pane.index()];
+                let view = self.view(pane);
                 let new_location = view.location.borrow().as_ref() != Some(&location);
-                let totals = listing.totals();
-                view.rows.set_listing(listing);
+                let summary = listing_summary(&listing);
+                view.rows.set_listing(listing, selection);
+                view.anchor.set(None);
                 let crumbs = breadcrumbs(&location);
                 let labels: Vec<SharedString> =
                     crumbs.iter().map(|c| c.label.as_str().into()).collect();
@@ -164,13 +180,21 @@ impl Controller {
                 self.edit_info(&window, pane, |info| {
                     info.location = location.display().to_string().into();
                     info.crumbs = ModelRc::new(VecModel::from(labels));
-                    info.summary = format_totals(&totals).into();
+                    info.summary = summary.into();
                     let (column, descending) = sort_column(sort);
                     info.sort_column = column;
                     info.sort_descending = descending;
                 });
                 *view.location.borrow_mut() = Some(location);
                 window.invoke_set_cursor(pane_index(pane), to_index(cursor), new_location);
+            }
+            Update::Selection {
+                pane,
+                snapshot,
+                selection,
+                change,
+            } => {
+                self.rows(pane).set_selection(snapshot, selection, &change);
             }
             Update::Status { pane, status } => {
                 self.edit_info(&window, pane, |info| apply_status(info, &status));
@@ -186,23 +210,71 @@ impl Controller {
         let Some(chord) = chord_from_slint(text, mods) else {
             return false;
         };
-        let Some(action) = self.keymap.lookup(chord) else {
-            tracing::trace!(?chord, "unbound key");
-            return false;
-        };
         let Some(window) = self.window.upgrade() else {
             return false;
         };
         let pane = self.active.get();
+        let Some(action) = self.keymap.lookup(chord) else {
+            // Typing a character starts the quick filter.
+            let plain = !(mods.ctrl || mods.alt || mods.meta);
+            if plain && matches!(chord.key, Key::Char(_)) {
+                window.invoke_start_filter(pane_index(pane), text.into());
+                return true;
+            }
+            tracing::trace!(?chord, "unbound key");
+            return false;
+        };
+        self.perform(&window, pane, action);
+        true
+    }
+
+    fn perform(&self, window: &AppWindow, pane: PaneId, action: Action) {
         let index = pane_index(pane);
+        let view = self.view(pane);
         match action {
-            Action::CursorUp => window.invoke_move_cursor(index, -1),
-            Action::CursorDown => window.invoke_move_cursor(index, 1),
-            Action::CursorPageUp => window.invoke_page_cursor(index, -1),
-            Action::CursorPageDown => window.invoke_page_cursor(index, 1),
-            Action::CursorFirst => window.invoke_set_cursor(index, 0, false),
-            Action::CursorLast => window.invoke_set_cursor(index, i32::MAX, false),
-            Action::Open => self.open(pane, to_row(self.cursor(&window, pane))),
+            Action::Move(motion) => {
+                view.anchor.set(None);
+                move_cursor(window, index, motion);
+            }
+            Action::Select(motion) => {
+                let anchor = view
+                    .anchor
+                    .get()
+                    .unwrap_or_else(|| to_row(self.cursor(window, pane)));
+                move_cursor(window, index, motion);
+                view.anchor.set(Some(anchor));
+                self.app.send(Command::SelectRange {
+                    pane,
+                    snapshot: view.rows.snapshot(),
+                    anchor,
+                    row: to_row(self.cursor(window, pane)),
+                });
+            }
+            Action::ToggleSelection { advance } => {
+                view.anchor.set(None);
+                self.app.send(Command::ToggleSelection {
+                    pane,
+                    snapshot: view.rows.snapshot(),
+                    row: to_row(self.cursor(window, pane)),
+                });
+                if advance {
+                    window.invoke_move_cursor(index, 1);
+                }
+            }
+            Action::SelectAll => {
+                view.anchor.set(None);
+                self.app.send(Command::SelectAll { pane });
+            }
+            Action::DeselectAll => {
+                view.anchor.set(None);
+                self.app.send(Command::DeselectAll { pane });
+            }
+            Action::Filter => window.invoke_start_filter(index, SharedString::new()),
+            Action::ClearFilter => self.app.send(Command::SetFilter {
+                pane,
+                text: String::new(),
+            }),
+            Action::Open => self.open(pane, to_row(self.cursor(window, pane))),
             Action::GoUp => self.app.send(Command::GoUp { pane }),
             Action::GoBack => self.app.send(Command::GoBack { pane }),
             Action::GoForward => self.app.send(Command::GoForward { pane }),
@@ -211,7 +283,38 @@ impl Controller {
             Action::Refresh => self.app.send(Command::Refresh { pane }),
             Action::SortBy(key) => self.app.send(Command::SortBy { pane, key }),
         }
-        true
+    }
+
+    /// Left mouse button pressed on `row`. The UI moves the cursor there
+    /// itself once the click completes.
+    fn row_pressed(&self, pane: PaneId, row: usize, control: bool, shift: bool) {
+        let Some(window) = self.window.upgrade() else {
+            return;
+        };
+        let view = self.view(pane);
+        let snapshot = view.rows.snapshot();
+        if control {
+            view.anchor.set(None);
+            self.app.send(Command::ToggleSelection {
+                pane,
+                snapshot,
+                row,
+            });
+        } else if shift {
+            let anchor = view
+                .anchor
+                .get()
+                .unwrap_or_else(|| to_row(self.cursor(&window, pane)));
+            view.anchor.set(Some(anchor));
+            self.app.send(Command::SelectRange {
+                pane,
+                snapshot,
+                anchor,
+                row,
+            });
+        } else {
+            view.anchor.set(None);
+        }
     }
 
     fn open(&self, pane: PaneId, row: usize) {
@@ -223,8 +326,12 @@ impl Controller {
         });
     }
 
+    fn view(&self, pane: PaneId) -> &PaneView {
+        &self.panes[pane.index()]
+    }
+
     fn rows(&self, pane: PaneId) -> &RowsModel {
-        &self.panes[pane.index()].rows
+        &self.view(pane).rows
     }
 
     fn cursor(&self, window: &AppWindow, pane: PaneId) -> i32 {
@@ -247,9 +354,55 @@ impl Controller {
     }
 }
 
+fn move_cursor(window: &AppWindow, pane: i32, motion: Motion) {
+    match motion {
+        Motion::Up => window.invoke_move_cursor(pane, -1),
+        Motion::Down => window.invoke_move_cursor(pane, 1),
+        Motion::PageUp => window.invoke_page_cursor(pane, -1),
+        Motion::PageDown => window.invoke_page_cursor(pane, 1),
+        Motion::First => window.invoke_set_cursor(pane, 0, false),
+        Motion::Last => window.invoke_set_cursor(pane, i32::MAX, false),
+    }
+}
+
+/// `3 folders, 12 files, 1.2 MiB`, plus how many entries a filter hides.
+fn listing_summary(listing: &Listing) -> String {
+    let mut summary = format_totals(&listing.totals());
+    let (shown, total) = (listing.entry_count(), listing.entries().len());
+    if shown < total {
+        summary.push_str(&format!(
+            "   (filter: {} of {} shown)",
+            format_count(shown),
+            format_count(total)
+        ));
+    }
+    summary
+}
+
+/// `Selected: 2 folders, 3 files, 1.2 MiB`; empty when nothing is selected.
+fn selection_summary(summary: &SelectionSummary) -> String {
+    if summary.is_empty() {
+        return String::new();
+    }
+    let plural = |n: usize, one: &str, many: &str| {
+        format!("{} {}", format_count(n), if n == 1 { one } else { many })
+    };
+    let mut parts = Vec::new();
+    if summary.dirs > 0 {
+        parts.push(plural(summary.dirs, "folder", "folders"));
+    }
+    if summary.files > 0 {
+        parts.push(plural(summary.files, "file", "files"));
+        parts.push(format_size(summary.bytes));
+    }
+    format!("Selected: {}", parts.join(", "))
+}
+
 fn apply_status(info: &mut PaneInfo, status: &PaneStatus) {
     info.can_go_back = status.history.can_go_back;
     info.can_go_forward = status.history.can_go_forward;
+    info.selection = selection_summary(&status.selection).into();
+    info.filter = status.filter.as_str().into();
     info.loading = match &status.loading {
         Some(loading) => format!(
             "Loading… {} entries  ({})",
@@ -315,4 +468,29 @@ fn sort_column(sort: SortSpec) -> (SortColumn, bool) {
         SortKey::Modified => SortColumn::Modified,
     };
     (column, sort.descending)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selection_summary_text() {
+        assert_eq!(selection_summary(&SelectionSummary::default()), "");
+        let summary = SelectionSummary {
+            dirs: 1,
+            files: 2,
+            bytes: 2048,
+        };
+        assert_eq!(
+            selection_summary(&summary),
+            "Selected: 1 folder, 2 files, 2.0 KiB"
+        );
+        let dirs_only = SelectionSummary {
+            dirs: 3,
+            files: 0,
+            bytes: 0,
+        };
+        assert_eq!(selection_summary(&dirs_only), "Selected: 3 folders");
+    }
 }

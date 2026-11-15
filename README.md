@@ -5,7 +5,8 @@ user interface. It aims to combine the power-user file management of Total Comma
 Double Commander with modern navigation and presentation.
 
 > **Status:** Milestone 2 in progress. You can browse local directories in two independent
-> panes with history, breadcrumbs and an editable location. File operations are not
+> panes with history, breadcrumbs, an editable location, multi-selection and a quick
+> filter. File operations are not
 > implemented yet; see [docs/roadmap.md](docs/roadmap.md).
 
 ## Features
@@ -21,6 +22,8 @@ Double Commander with modern navigation and presentation.
 - Back/forward history per pane that restores the cursor, clickable breadcrumbs, and
   an editable location: `~`, relative paths and `..` work, and a file path opens its
   folder with the file selected
+- Multi-selection by keyboard and mouse, with a summary of what is selected
+- Quick filter: start typing, or use wildcards and alternatives (`*.jpg;*.png`)
 - Keyboard-driven navigation through a toolkit-independent keymap
 - Follows the system light/dark preference; vector icons for crisp rendering at any DPI
 
@@ -34,6 +37,13 @@ Double Commander with modern navigation and presentation.
 | Alt+← / Alt+→, mouse back/forward buttons | Back / forward in the pane's history |
 | Ctrl+L, or click the empty part of the location bar | Edit the location (Enter go, Esc cancel) |
 | Click a breadcrumb | Go to that folder |
+| Insert | Select/deselect the entry under the cursor and move down |
+| Space | Select/deselect the entry under the cursor |
+| Shift+↑ ↓ PgUp PgDn Home End, Shift+click | Select a range |
+| Ctrl+click | Select/deselect one entry |
+| Ctrl+A / Ctrl+Shift+A | Select all shown entries / deselect all |
+| Type any letter, or Ctrl+F | Quick filter (↑ ↓ move, Enter open, Tab back to the list, Esc clear) |
+| Esc (in the list) | Clear the quick filter |
 | Tab, Shift+Tab | Switch the active pane |
 | Ctrl+R | Re-read the active pane |
 | Ctrl+F3 / F4 / F5 / F6 | Sort by name / extension / date / size (again: reverse) |

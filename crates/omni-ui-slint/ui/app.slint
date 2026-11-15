@@ -40,6 +40,17 @@ export component AppWindow inherits Window {
     callback go-back(pane: int);
     callback go-forward(pane: int);
     callback go-up(pane: int);
+    callback row-pressed(pane: int, row: int, control: bool, shift: bool);
+    callback filter-edited(pane: int, text: string);
+
+    /// Opens the quick filter of a pane, appending `typed`.
+    public function start-filter(pane: int, typed: string) {
+        if pane == 0 {
+            left.start-filter(typed);
+        } else {
+            right.start-filter(typed);
+        }
+    }
 
     /// Opens the path editor of a pane (Ctrl+L).
     public function edit-location(pane: int) {
@@ -122,6 +133,12 @@ export component AppWindow inherits Window {
                     edit-finished => {
                         keys.focus();
                     }
+                    row-pressed(row, control, shift) => {
+                        root.row-pressed(0, row, control, shift);
+                    }
+                    filter-edited(text) => {
+                        root.filter-edited(0, text);
+                    }
                 }
 
                 right := FilePane {
@@ -159,11 +176,17 @@ export component AppWindow inherits Window {
                     edit-finished => {
                         keys.focus();
                     }
+                    row-pressed(row, control, shift) => {
+                        root.row-pressed(1, row, control, shift);
+                    }
+                    filter-edited(text) => {
+                        root.filter-edited(1, text);
+                    }
                 }
             }
 
             Text {
-                text: "Enter open   Backspace parent   Alt+←/→ back/forward   Ctrl+L edit path   Tab switch pane   Ctrl+R refresh   Ctrl+F3–F6 sort";
+                text: "Ins/Space select   Shift+↑↓ range   Ctrl+A all   type to filter   Alt+←/→ back/forward   Ctrl+L path   Tab pane   Ctrl+R refresh   Ctrl+F3–F6 sort";
                 font-size: 11px;
                 color: Palette.foreground;
                 opacity: 0.6;

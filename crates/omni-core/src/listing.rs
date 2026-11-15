@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use omni_vfs::Entry;
 
+use crate::filter::Filter;
 use crate::sort::{NameKeys, SortSpec, sorted_order};
 
 /// Identifies one published listing. Commands that refer to a row carry the
@@ -25,7 +26,8 @@ impl SnapshotId {
     }
 }
 
-/// Aggregate counts over a listing (the parent row is not counted).
+/// Aggregate counts over the rows of a listing (the parent row is not
+/// counted; entries hidden by a filter are not counted either).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Totals {
     /// Directories and links to directories.
@@ -60,7 +62,7 @@ pub struct Listing {
 impl Listing {
     /// Sorts `entries` with `sort`. With `has_parent`, row 0 is the `..` row.
     pub fn new(entries: Vec<Entry>, sort: SortSpec, has_parent: bool) -> Self {
-        let totals = totals(&entries);
+        let totals = totals(entries.iter());
         let keys = NameKeys::new(&entries);
         let order = sorted_order(&entries, &keys, sort);
         Self {
@@ -92,8 +94,50 @@ impl Listing {
         }
     }
 
+    /// Only the rows whose names match `filter` (the `..` row stays), under
+    /// a new id. Entry indices are unchanged.
+    pub fn filtered(&self, filter: &Filter) -> Self {
+        let order: Vec<u32> = self
+            .order
+            .iter()
+            .copied()
+            .filter(|&i| filter.matches(&self.entries[i as usize].name))
+            .collect();
+        Self {
+            id: SnapshotId::next(),
+            entries: Arc::clone(&self.entries),
+            keys: Arc::clone(&self.keys),
+            totals: totals(order.iter().map(|&i| &self.entries[i as usize])),
+            order,
+            has_parent: self.has_parent,
+            sort: self.sort,
+        }
+    }
+
     pub fn id(&self) -> SnapshotId {
         self.id
+    }
+
+    /// All entries of the directory, including those hidden by a filter,
+    /// indexed by entry index.
+    pub fn entries(&self) -> &[Entry] {
+        &self.entries
+    }
+
+    /// Entry indices of the rows, in display order (without `..`).
+    pub fn visible(&self) -> &[u32] {
+        &self.order
+    }
+
+    /// The row of the first real entry (after `..`).
+    pub fn first_entry_row(&self) -> usize {
+        usize::from(self.has_parent)
+    }
+
+    /// Entry index shown in `row`; `None` for `..` and out-of-range rows.
+    pub fn entry_index(&self, row: usize) -> Option<u32> {
+        let position = row.checked_sub(self.first_entry_row())?;
+        self.order.get(position).copied()
     }
 
     pub fn sort(&self) -> SortSpec {
@@ -143,8 +187,8 @@ impl Listing {
     }
 }
 
-fn totals(entries: &[Entry]) -> Totals {
-    entries.iter().fold(Totals::default(), |mut t, e| {
+fn totals<'a>(entries: impl Iterator<Item = &'a Entry>) -> Totals {
+    entries.fold(Totals::default(), |mut t, e| {
         if e.is_dir_like() {
             t.dirs += 1;
         } else {
@@ -220,5 +264,30 @@ mod tests {
         assert!(Arc::ptr_eq(&l.entries, &r.entries));
         assert_eq!(row_name(&r, 1), "a.txt");
         assert_eq!(r.sort(), size);
+    }
+
+    #[test]
+    fn filtering_keeps_entry_indices_and_parent_row() {
+        let l = Listing::new(sample(), SortSpec::default(), true);
+        let f = l.filtered(&Filter::new("*.txt").unwrap());
+        assert_ne!(l.id(), f.id());
+        assert_eq!(
+            (0..f.len()).map(|r| row_name(&f, r)).collect::<Vec<_>>(),
+            ["..", "a.txt", "b.txt"]
+        );
+        assert_eq!(
+            f.totals(),
+            Totals {
+                dirs: 0,
+                files: 2,
+                bytes: 15
+            }
+        );
+        assert_eq!(f.entries().len(), 3, "hidden entries are still there");
+        // "a.txt" is entry 2 in both listings.
+        assert_eq!(l.entry_index(2), Some(2));
+        assert_eq!(f.entry_index(1), Some(2));
+        assert_eq!(f.entry_index(0), None, "the parent row has no entry");
+        assert_eq!(f.entry_index(9), None);
     }
 }

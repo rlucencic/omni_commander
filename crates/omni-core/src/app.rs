@@ -20,7 +20,8 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::listing::{Listing, SnapshotId};
-use crate::pane::{Changes, LoadRequest, LoadToken, PaneState, PaneStatus};
+use crate::pane::{Changes, LoadRequest, LoadToken, PaneState, PaneStatus, SelectionChange};
+use crate::selection::Selection;
 use crate::sort::{SortKey, SortSpec};
 
 /// Capacity of the update channel. When the UI falls behind, the core waits
@@ -97,6 +98,31 @@ pub enum Command {
         pane: PaneId,
         key: SortKey,
     },
+    /// Select or deselect the entry in `row` (Insert, Space, Ctrl+click).
+    ToggleSelection {
+        pane: PaneId,
+        snapshot: SnapshotId,
+        row: usize,
+    },
+    /// Shift-selection from `anchor` to `row`; repeat with the same anchor
+    /// to grow or shrink the range.
+    SelectRange {
+        pane: PaneId,
+        snapshot: SnapshotId,
+        anchor: usize,
+        row: usize,
+    },
+    SelectAll {
+        pane: PaneId,
+    },
+    DeselectAll {
+        pane: PaneId,
+    },
+    /// Set the quick filter; empty text removes it.
+    SetFilter {
+        pane: PaneId,
+        text: String,
+    },
     /// Make `pane` the active pane.
     Activate(PaneId),
     /// Make the other pane active.
@@ -113,8 +139,18 @@ pub enum Update {
         listing: Arc<Listing>,
         sort: SortSpec,
         cursor: usize,
+        /// Selected entries, by entry index of `listing`.
+        selection: Arc<Selection>,
     },
-    /// Loading progress or status message of a pane changed.
+    /// The selection of the listing `snapshot` changed in the given rows.
+    Selection {
+        pane: PaneId,
+        snapshot: SnapshotId,
+        selection: Arc<Selection>,
+        change: SelectionChange,
+    },
+    /// Loading progress, status message, selection summary or filter of a
+    /// pane changed.
     Status { pane: PaneId, status: PaneStatus },
     /// The active pane changed.
     ActivePane(PaneId),
@@ -267,6 +303,20 @@ impl Core {
             }
             Command::Refresh { pane } => (pane, self.pane(pane).refresh()),
             Command::SortBy { pane, key } => (pane, self.pane(pane).sort_by(key)),
+            Command::ToggleSelection {
+                pane,
+                snapshot,
+                row,
+            } => (pane, self.pane(pane).toggle_selection(snapshot, row)),
+            Command::SelectRange {
+                pane,
+                snapshot,
+                anchor,
+                row,
+            } => (pane, self.pane(pane).select_range(snapshot, anchor, row)),
+            Command::SelectAll { pane } => (pane, self.pane(pane).select_all()),
+            Command::DeselectAll { pane } => (pane, self.pane(pane).deselect_all()),
+            Command::SetFilter { pane, text } => (pane, self.pane(pane).set_filter(&text)),
             Command::Activate(pane) => return self.set_active(pane).await,
             Command::SwitchPane => return self.set_active(self.active.other()).await,
         };
@@ -304,6 +354,15 @@ impl Core {
                 listing: Arc::clone(state.listing()),
                 sort: state.sort(),
                 cursor,
+                selection: Arc::clone(state.selection()),
+            };
+            self.send(update).await?;
+        } else if let Some(change) = changes.selection {
+            let update = Update::Selection {
+                pane,
+                snapshot: state.listing().id(),
+                selection: Arc::clone(state.selection()),
+                change,
             };
             self.send(update).await?;
         }

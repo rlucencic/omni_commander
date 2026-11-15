@@ -164,6 +164,7 @@ component Cell inherits Rectangle {
     in property <TextHorizontalAlignment> alignment: TextHorizontalAlignment.left;
     in property <brush> foreground;
     in property <string> font-family;
+    in property <bool> bold;
 
     Text {
         x: Metrics.cell-padding;
@@ -175,6 +176,7 @@ component Cell inherits Rectangle {
         overflow: elide;
         color: root.foreground;
         font-family: root.font-family;
+        font-weight: root.bold ? 700 : 400;
     }
 }
 
@@ -187,9 +189,12 @@ component FileRowView inherits Rectangle {
     callback double-clicked;
     /// The mouse's back (false) or forward (true) button was pressed.
     callback history-button(forward: bool);
+    /// The left button went down, with these modifiers.
+    callback pressed(control: bool, shift: bool);
 
     property <bool> highlighted: root.current && root.pane-active;
-    property <brush> base-color: root.highlighted ? Palette.selection-foreground : Palette.foreground;
+    property <color> marked-color: Palette.color-scheme == ColorScheme.dark ? #ff9e64 : #c2410c;
+    property <brush> base-color: root.highlighted ? Palette.selection-foreground : (root.data.selected ? root.marked-color : Palette.foreground);
     property <brush> text-color: root.data.hidden ? root.base-color.transparentize(0.4) : root.base-color;
 
     height: Metrics.row-height;
@@ -207,13 +212,23 @@ component FileRowView inherits Rectangle {
         }
         pointer-event(event) => {
             if event.kind == PointerEventKind.down {
-                if event.button == PointerEventButton.back {
+                if event.button == PointerEventButton.left {
+                    root.pressed(event.modifiers.control, event.modifiers.shift);
+                } else if event.button == PointerEventButton.back {
                     root.history-button(false);
                 } else if event.button == PointerEventButton.forward {
                     root.history-button(true);
                 }
             }
         }
+    }
+
+    // Selection marker.
+    if root.data.selected: Rectangle {
+        x: 0px;
+        width: 3px;
+        height: root.height;
+        background: root.marked-color;
     }
 
     EntryIconView {
@@ -229,6 +244,7 @@ component FileRowView inherits Rectangle {
         height: root.height;
         text: root.data.name;
         foreground: root.text-color;
+        bold: root.data.selected;
     }
 
     Cell {
@@ -528,9 +544,38 @@ export component FilePane inherits Rectangle {
     callback go-up;
     callback location-entered(text: string);
     callback edit-finished;
+    callback row-pressed(row: int, control: bool, shift: bool);
+    /// The quick filter text was edited.
+    callback filter-edited(text: string);
+
+    /// True while the filter editor has keyboard focus.
+    out property <bool> filtering: false;
+    property <bool> filter-shown: root.filtering || root.info.filter != "";
 
     public function edit-location() {
         location.edit();
+    }
+
+    /// Opens the quick filter, appending `typed` to the current filter text.
+    public function start-filter(typed: string) {
+        root.filtering = true;
+        filter-editor.text = root.info.filter + typed;
+        filter-editor.focus();
+        if typed == "" {
+            filter-editor.select-all();
+        } else {
+            // Caret to the end, so typing continues after the first letter.
+            filter-editor.select-all();
+            filter-editor.clear-selection();
+            root.filter-edited(filter-editor.text);
+        }
+    }
+
+    function stop-filtering() {
+        if root.filtering {
+            root.filtering = false;
+            root.edit-finished();
+        }
     }
 
     // Fixed-width columns are laid out from the right edge; the name column
@@ -700,12 +745,84 @@ export component FilePane inherits Rectangle {
                 double-clicked => {
                     root.activated(index);
                 }
+                pressed(control, shift) => {
+                    root.row-pressed(index, control, shift);
+                }
                 history-button(forward) => {
                     root.clicked();
                     if forward {
                         root.go-forward();
                     } else {
                         root.go-back();
+                    }
+                }
+            }
+        }
+
+        // Quick filter.
+        Rectangle {
+            height: root.filter-shown ? 28px : 0px;
+            visible: root.filter-shown;
+            background: Palette.alternate-background;
+
+            HorizontalLayout {
+                padding: 2px;
+                padding-left: 8px;
+                spacing: 6px;
+
+                Text {
+                    text: "Filter";
+                    vertical-alignment: center;
+                    color: Palette.foreground;
+                    opacity: 0.8;
+                }
+
+                FocusScope {
+                    horizontal-stretch: 1;
+                    // While typing, Up/Down/PgUp/PgDn move through the
+                    // matches; other unused keys must not reach the list's
+                    // shortcuts.
+                    key-pressed(event) => {
+                        if event.text == Key.UpArrow {
+                            root.move-cursor(-1);
+                        } else if event.text == Key.DownArrow {
+                            root.move-cursor(1);
+                        } else if event.text == Key.PageUp {
+                            root.page-cursor(-1);
+                        } else if event.text == Key.PageDown {
+                            root.page-cursor(1);
+                        } else if event.text == Key.Tab {
+                            root.stop-filtering();
+                        }
+                        accept
+                    }
+
+                    filter-editor := LineEdit {
+                        width: parent.width;
+                        height: parent.height;
+                        placeholder-text: "name, *.ext, a;b";
+                        edited(text) => {
+                            root.filter-edited(text);
+                        }
+                        // Enter opens what the cursor is on.
+                        accepted(text) => {
+                            root.stop-filtering();
+                            root.activated(root.current-row);
+                        }
+                        key-pressed(event) => {
+                            if event.text == Key.Escape {
+                                self.text = "";
+                                root.filter-edited("");
+                                root.stop-filtering();
+                                return accept;
+                            }
+                            reject
+                        }
+                        changed has-focus => {
+                            if !self.has-focus {
+                                root.stop-filtering();
+                            }
+                        }
                     }
                 }
             }
@@ -736,7 +853,7 @@ export component FilePane inherits Rectangle {
                 x: 8px;
                 width: parent.width - 16px;
                 height: parent.height;
-                text: root.info.loading != "" ? root.info.loading : root.info.summary;
+                text: root.info.loading != "" ? root.info.loading : (root.info.selection != "" ? root.info.selection : root.info.summary);
                 vertical-alignment: center;
                 overflow: elide;
                 color: Palette.foreground;
