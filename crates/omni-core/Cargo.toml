@@ -1,0 +1,20 @@
+[package]
+name = "omni-core"
+description = "UI-independent application logic for OmniCommander"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+omni-vfs.workspace = true
+jiff.workspace = true
+tokio = { workspace = true, features = ["sync", "rt", "macros"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["sync", "rt", "macros", "rt-multi-thread", "time"] }
+
+[lints]
+workspace = true

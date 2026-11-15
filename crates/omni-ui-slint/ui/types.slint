@@ -1,0 +1,40 @@
+// Data exchanged between Rust and the UI.
+
+export enum EntryIcon { parent, folder, file, folder-link, file-link, broken-link, other }
+
+export enum SortColumn { name, extension, size, modified }
+
+export enum MessageLevel { none, info, warning, error }
+
+/// One visible row of a file list, already formatted for display.
+export struct FileRow {
+    name: string,
+    ext: string,
+    size: string,
+    modified: string,
+    attributes: string,
+    icon: EntryIcon,
+    hidden: bool,
+}
+
+/// Everything about a pane except its rows.
+export struct PaneInfo {
+    location: string,
+    summary: string,
+    /// Non-empty while a directory is loading.
+    loading: string,
+    message: string,
+    message-level: MessageLevel,
+    sort-column: SortColumn,
+    sort-descending: bool,
+}
+
+export global Metrics {
+    out property <length> row-height: 22px;
+    out property <length> icon-column: 24px;
+    out property <length> ext-column: 64px;
+    out property <length> size-column: 84px;
+    out property <length> date-column: 124px;
+    out property <length> attr-column: 92px;
+    out property <length> cell-padding: 6px;
+}

@@ -1,0 +1,19 @@
+[package]
+name = "omni-vfs"
+description = "Virtual filesystem abstraction and providers for OmniCommander"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "rt"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["sync", "rt", "macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,469 @@
+// One file panel: location bar, column headers, virtualized rows, status.
+
+import { ListView, Palette } from "std-widgets.slint";
+import { EntryIcon, FileRow, MessageLevel, Metrics, PaneInfo, SortColumn } from "types.slint";
+
+// Horizontal geometry shared by the header and every row. Cells are placed
+// explicitly rather than with layouts: no per-row layout solving, and the
+// visible columns can depend on the pane width without a binding loop.
+struct Columns {
+    name-x: length,
+    name-width: length,
+    ext-x: length,
+    size-x: length,
+    date-x: length,
+    attr-x: length,
+    show-date: bool,
+    show-attributes: bool,
+}
+
+// Small vector icons, drawn with paths so they follow the theme and scale
+// crisply at any DPI without image assets.
+component EntryIconView inherits Rectangle {
+    in property <EntryIcon> kind;
+
+    property <bool> is-folder: root.kind == EntryIcon.folder || root.kind == EntryIcon.folder-link;
+    property <bool> is-file: root.kind == EntryIcon.file || root.kind == EntryIcon.file-link || root.kind == EntryIcon.broken-link;
+    property <bool> is-link: root.kind == EntryIcon.folder-link || root.kind == EntryIcon.file-link || root.kind == EntryIcon.broken-link;
+    property <bool> dark: Palette.color-scheme == ColorScheme.dark;
+
+    width: 16px;
+    height: 16px;
+
+    if root.is-folder: Path {
+        width: 16px;
+        height: 16px;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        commands: "M1.5 3.5 L6 3.5 L7.5 5 L14.5 5 L14.5 13.5 L1.5 13.5 Z";
+        fill: root.dark ? #d9a441 : #e8b04a;
+        stroke: root.dark ? #f0c86e : #b07d1e;
+        stroke-width: 1px;
+    }
+
+    if root.is-file: Path {
+        width: 16px;
+        height: 16px;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        commands: "M3.5 1.5 L9.5 1.5 L12.5 4.5 L12.5 14.5 L3.5 14.5 Z";
+        fill: root.dark ? #3b4048 : #ffffff;
+        stroke: root.kind == EntryIcon.broken-link ? #d13438 : (root.dark ? #9aa3ad : #7a838c);
+        stroke-width: 1px;
+    }
+
+    if root.is-file: Path {
+        width: 16px;
+        height: 16px;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        commands: "M9.5 1.5 L9.5 4.5 L12.5 4.5";
+        stroke: root.dark ? #9aa3ad : #7a838c;
+        stroke-width: 1px;
+    }
+
+    if root.kind == EntryIcon.parent: Path {
+        width: 16px;
+        height: 16px;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        commands: "M8 2 L13.5 7.5 L10 7.5 L10 14 L6 14 L6 7.5 L2.5 7.5 Z";
+        fill: Palette.foreground;
+        opacity: 0.7;
+    }
+
+    if root.kind == EntryIcon.other: Path {
+        width: 16px;
+        height: 16px;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        commands: "M8 2.5 L13.5 8 L8 13.5 L2.5 8 Z";
+        fill: Palette.alternate-background;
+        stroke: Palette.foreground;
+        stroke-width: 1px;
+    }
+
+    // Link badge in the lower-left corner.
+    if root.is-link: Rectangle {
+        x: 0px;
+        y: 8px;
+        width: 8px;
+        height: 8px;
+        background: Palette.background;
+        border-width: 1px;
+        border-color: root.kind == EntryIcon.broken-link ? #d13438 : Palette.foreground;
+        Path {
+            width: 8px;
+            height: 8px;
+            viewbox-width: 8;
+            viewbox-height: 8;
+            commands: "M2 6 L6 2 M3.5 2 L6 2 L6 4.5";
+            stroke: root.kind == EntryIcon.broken-link ? #d13438 : Palette.foreground;
+            stroke-width: 1px;
+        }
+    }
+}
+
+component HeaderCell inherits Rectangle {
+    in property <string> text;
+    in property <bool> sortable: true;
+    in property <bool> sorted;
+    in property <bool> descending;
+    in property <TextHorizontalAlignment> alignment: TextHorizontalAlignment.left;
+    callback clicked;
+
+    background: touch.has-hover && root.sortable ? Palette.control-background : transparent;
+
+    touch := TouchArea {
+        enabled: root.sortable;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: Metrics.cell-padding;
+        padding-right: Metrics.cell-padding;
+        spacing: 4px;
+
+        Text {
+            text: root.text;
+            horizontal-alignment: root.alignment;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+            font-weight: root.sorted ? 700 : 400;
+            color: Palette.foreground;
+        }
+
+        if root.sorted: Rectangle {
+            width: 8px;
+            if root.descending: Path {
+                width: 8px;
+                height: 5px;
+                viewbox-width: 8;
+                viewbox-height: 5;
+                commands: "M0 0 L8 0 L4 5 Z";
+                fill: Palette.foreground;
+            }
+            if !root.descending: Path {
+                width: 8px;
+                height: 5px;
+                viewbox-width: 8;
+                viewbox-height: 5;
+                commands: "M0 5 L4 0 L8 5 Z";
+                fill: Palette.foreground;
+            }
+        }
+    }
+}
+
+// A text cell with the same inner padding as HeaderCell, so columns align.
+component Cell inherits Rectangle {
+    in property <string> text;
+    in property <TextHorizontalAlignment> alignment: TextHorizontalAlignment.left;
+    in property <brush> foreground;
+    in property <string> font-family;
+
+    Text {
+        x: Metrics.cell-padding;
+        width: parent.width - 2 * Metrics.cell-padding;
+        height: parent.height;
+        text: root.text;
+        horizontal-alignment: root.alignment;
+        vertical-alignment: center;
+        overflow: elide;
+        color: root.foreground;
+        font-family: root.font-family;
+    }
+}
+
+component FileRowView inherits Rectangle {
+    in property <FileRow> data;
+    in property <Columns> columns;
+    in property <bool> current;
+    in property <bool> pane-active;
+    callback clicked;
+    callback double-clicked;
+
+    property <bool> highlighted: root.current && root.pane-active;
+    property <brush> base-color: root.highlighted ? Palette.selection-foreground : Palette.foreground;
+    property <brush> text-color: root.data.hidden ? root.base-color.transparentize(0.4) : root.base-color;
+
+    height: Metrics.row-height;
+    background: root.highlighted ? Palette.selection-background : (touch.has-hover ? Palette.alternate-background : transparent);
+    // The inactive pane still shows where its cursor is.
+    border-width: root.current && !root.pane-active ? 1px : 0px;
+    border-color: Palette.selection-background;
+
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+        double-clicked => {
+            root.double-clicked();
+        }
+    }
+
+    EntryIconView {
+        x: root.columns.name-x + (Metrics.icon-column - 16px) / 2;
+        y: (root.height - 16px) / 2;
+        kind: root.data.icon;
+        opacity: root.data.hidden ? 0.6 : 1.0;
+    }
+
+    Cell {
+        x: root.columns.name-x + Metrics.icon-column - Metrics.cell-padding;
+        width: max(0px, root.columns.name-width - Metrics.icon-column + Metrics.cell-padding);
+        height: root.height;
+        text: root.data.name;
+        foreground: root.text-color;
+    }
+
+    Cell {
+        x: root.columns.ext-x;
+        width: Metrics.ext-column;
+        height: root.height;
+        text: root.data.ext;
+        foreground: root.text-color;
+    }
+
+    Cell {
+        x: root.columns.size-x;
+        width: Metrics.size-column;
+        height: root.height;
+        text: root.data.size;
+        alignment: right;
+        foreground: root.text-color;
+    }
+
+    if root.columns.show-date: Cell {
+        x: root.columns.date-x;
+        width: Metrics.date-column;
+        height: root.height;
+        text: root.data.modified;
+        foreground: root.text-color;
+    }
+
+    if root.columns.show-attributes: Cell {
+        x: root.columns.attr-x;
+        width: Metrics.attr-column;
+        height: root.height;
+        text: root.data.attributes;
+        foreground: root.text-color;
+        font-family: "monospace";
+    }
+}
+
+export component FilePane inherits Rectangle {
+    in property <[FileRow]> rows;
+    in property <PaneInfo> info;
+    in property <bool> active;
+    out property <int> current-row: 0;
+
+    callback cursor-changed(row: int);
+    callback activated(row: int);
+    callback clicked;
+    callback sort-requested(column: SortColumn);
+
+    // Fixed-width columns are laid out from the right edge; the name column
+    // takes what remains. Narrow panes drop the date and attribute columns.
+    property <length> table-width: root.width - 2px;
+    property <bool> show-date: root.table-width >= 460px;
+    property <bool> show-attributes: root.table-width >= 620px;
+    property <length> attr-x: root.table-width - 12px - (root.show-attributes ? Metrics.attr-column : 0px);
+    property <length> date-x: root.attr-x - (root.show-date ? Metrics.date-column : 0px);
+    property <length> size-x: root.date-x - Metrics.size-column;
+    property <length> ext-x: root.size-x - Metrics.ext-column;
+    property <Columns> columns: {
+        name-x: 4px,
+        name-width: max(0px, root.ext-x - 4px),
+        ext-x: root.ext-x,
+        size-x: root.size-x,
+        date-x: root.date-x,
+        attr-x: root.attr-x,
+        show-date: root.show-date,
+        show-attributes: root.show-attributes,
+    };
+    property <int> page-rows: max(1, floor(list.visible-height / Metrics.row-height) - 1);
+    property <bool> dark: Palette.color-scheme == ColorScheme.dark;
+    property <color> error-color: root.dark ? #ff7b72 : #c42b1c;
+    property <color> warning-color: root.dark ? #e3b341 : #9a6700;
+
+    /// Places the cursor after the rows were replaced.
+    public function place-cursor(row: int, scroll-to-top: bool) {
+        if scroll-to-top {
+            list.content-y = 0;
+        }
+        root.set-cursor(row);
+    }
+
+    public function move-cursor(delta: int) {
+        root.set-cursor(root.current-row + delta);
+    }
+
+    public function page-cursor(pages: int) {
+        root.set-cursor(root.current-row + pages * root.page-rows);
+    }
+
+    function set-cursor(row: int) {
+        root.current-row = max(0, min(row, root.rows.length - 1));
+        root.ensure-visible(root.current-row);
+        root.cursor-changed(root.current-row);
+    }
+
+    // Scrolls as little as possible to make `row` fully visible.
+    // `content-y` is the (non-positive) offset of the rows in the viewport.
+    function ensure-visible(row: int) {
+        if row * Metrics.row-height < -list.content-y {
+            list.content-y = -row * Metrics.row-height;
+        } else if (row + 1) * Metrics.row-height > list.visible-height - list.content-y {
+            list.content-y = list.visible-height - (row + 1) * Metrics.row-height;
+        }
+    }
+
+    background: Palette.background;
+    border-width: 1px;
+    border-color: root.active ? Palette.accent-background : Palette.border;
+
+    VerticalLayout {
+        padding: 1px;
+
+        // Location bar.
+        Rectangle {
+            height: 26px;
+            background: root.active ? Palette.accent-background : Palette.alternate-background;
+
+            TouchArea {
+                clicked => {
+                    root.clicked();
+                }
+            }
+
+            Text {
+                x: 8px;
+                width: parent.width - 16px;
+                height: parent.height;
+                text: root.info.location;
+                vertical-alignment: center;
+                overflow: elide;
+                font-weight: 600;
+                color: root.active ? Palette.accent-foreground : Palette.foreground;
+            }
+        }
+
+        // Column headers.
+        Rectangle {
+            height: Metrics.row-height + 2px;
+            background: Palette.alternate-background;
+
+            HeaderCell {
+                x: root.columns.name-x;
+                width: root.columns.name-width;
+                text: "Name";
+                sorted: root.info.sort-column == SortColumn.name;
+                descending: root.info.sort-descending;
+                clicked => {
+                    root.sort-requested(SortColumn.name);
+                }
+            }
+
+            HeaderCell {
+                x: root.columns.ext-x;
+                width: Metrics.ext-column;
+                text: "Ext";
+                sorted: root.info.sort-column == SortColumn.extension;
+                descending: root.info.sort-descending;
+                clicked => {
+                    root.sort-requested(SortColumn.extension);
+                }
+            }
+
+            HeaderCell {
+                x: root.columns.size-x;
+                width: Metrics.size-column;
+                text: "Size";
+                alignment: right;
+                sorted: root.info.sort-column == SortColumn.size;
+                descending: root.info.sort-descending;
+                clicked => {
+                    root.sort-requested(SortColumn.size);
+                }
+            }
+
+            if root.show-date: HeaderCell {
+                x: root.columns.date-x;
+                width: Metrics.date-column;
+                text: "Modified";
+                sorted: root.info.sort-column == SortColumn.modified;
+                descending: root.info.sort-descending;
+                clicked => {
+                    root.sort-requested(SortColumn.modified);
+                }
+            }
+
+            if root.show-attributes: HeaderCell {
+                x: root.columns.attr-x;
+                width: Metrics.attr-column;
+                text: "Attributes";
+                sortable: false;
+            }
+
+            Rectangle {
+                y: parent.height - 1px;
+                height: 1px;
+                background: Palette.border;
+            }
+        }
+
+        // Rows. ListView only instantiates the visible ones.
+        list := ListView {
+            for entry[index] in root.rows: FileRowView {
+                data: entry;
+                current: index == root.current-row;
+                pane-active: root.active;
+                columns: root.columns;
+                clicked => {
+                    root.clicked();
+                    root.set-cursor(index);
+                }
+                double-clicked => {
+                    root.activated(index);
+                }
+            }
+        }
+
+        // Message line (errors, warnings, notices).
+        if root.info.message != "": Rectangle {
+            height: 22px;
+            background: Palette.alternate-background;
+
+            Text {
+                x: 8px;
+                width: parent.width - 16px;
+                height: parent.height;
+                text: root.info.message;
+                vertical-alignment: center;
+                overflow: elide;
+                color: root.info.message-level == MessageLevel.error ? root.error-color : (root.info.message-level == MessageLevel.warning ? root.warning-color : Palette.foreground);
+            }
+        }
+
+        // Status line.
+        Rectangle {
+            height: 22px;
+            background: Palette.alternate-background;
+
+            Text {
+                x: 8px;
+                width: parent.width - 16px;
+                height: parent.height;
+                text: root.info.loading != "" ? root.info.loading : root.info.summary;
+                vertical-alignment: center;
+                overflow: elide;
+                color: Palette.foreground;
+                opacity: 0.8;
+            }
+        }
+    }
+}

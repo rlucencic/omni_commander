@@ -1,0 +1,124 @@
+// OmniCommander main window.
+//
+// This file only describes presentation. Every user action is forwarded to
+// Rust through a callback; the only state kept here is the per-pane cursor,
+// which must react instantly to key repeat without a round trip.
+
+import { Palette } from "std-widgets.slint";
+import { EntryIcon, FileRow, MessageLevel, PaneInfo, SortColumn } from "types.slint";
+import { FilePane } from "file-pane.slint";
+
+export { EntryIcon, FileRow, MessageLevel, PaneInfo, SortColumn }
+
+export component AppWindow inherits Window {
+    title: "OmniCommander";
+    preferred-width: 1280px;
+    preferred-height: 800px;
+    min-width: 640px;
+    min-height: 360px;
+    background: Palette.background;
+    default-font-size: 13px;
+    forward-focus: keys;
+
+    in property <[FileRow]> left-rows;
+    in property <[FileRow]> right-rows;
+    in property <PaneInfo> left-info;
+    in property <PaneInfo> right-info;
+    /// 0 = left, 1 = right.
+    in property <int> active-pane: 0;
+    out property <int> left-cursor: left.current-row;
+    out property <int> right-cursor: right.current-row;
+
+    /// A key press the UI did not handle itself. Return true if consumed.
+    callback key-pressed(text: string, control: bool, alt: bool, shift: bool, meta: bool) -> bool;
+    callback cursor-changed(pane: int, row: int);
+    callback row-activated(pane: int, row: int);
+    callback pane-clicked(pane: int);
+    callback sort-requested(pane: int, column: SortColumn);
+
+    /// Places the cursor after a new listing arrived.
+    public function set-cursor(pane: int, row: int, scroll-to-top: bool) {
+        if pane == 0 {
+            left.place-cursor(row, scroll-to-top);
+        } else {
+            right.place-cursor(row, scroll-to-top);
+        }
+    }
+
+    public function move-cursor(pane: int, delta: int) {
+        if pane == 0 {
+            left.move-cursor(delta);
+        } else {
+            right.move-cursor(delta);
+        }
+    }
+
+    public function page-cursor(pane: int, pages: int) {
+        if pane == 0 {
+            left.page-cursor(pages);
+        } else {
+            right.page-cursor(pages);
+        }
+    }
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            root.key-pressed(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift, event.modifiers.meta) ? EventResult.accept : EventResult.reject
+        }
+
+        VerticalLayout {
+            padding: 4px;
+            spacing: 4px;
+
+            HorizontalLayout {
+                spacing: 4px;
+
+                left := FilePane {
+                    rows: root.left-rows;
+                    info: root.left-info;
+                    active: root.active-pane == 0;
+                    cursor-changed(row) => {
+                        root.cursor-changed(0, row);
+                    }
+                    activated(row) => {
+                        root.row-activated(0, row);
+                    }
+                    clicked => {
+                        keys.focus();
+                        root.pane-clicked(0);
+                    }
+                    sort-requested(column) => {
+                        root.sort-requested(0, column);
+                    }
+                }
+
+                right := FilePane {
+                    rows: root.right-rows;
+                    info: root.right-info;
+                    active: root.active-pane == 1;
+                    cursor-changed(row) => {
+                        root.cursor-changed(1, row);
+                    }
+                    activated(row) => {
+                        root.row-activated(1, row);
+                    }
+                    clicked => {
+                        keys.focus();
+                        root.pane-clicked(1);
+                    }
+                    sort-requested(column) => {
+                        root.sort-requested(1, column);
+                    }
+                }
+            }
+
+            Text {
+                text: "Enter open   Backspace parent   Tab switch pane   Ctrl+R refresh   Ctrl+F3/F4/F5/F6 sort by name/ext/date/size";
+                font-size: 11px;
+                color: Palette.foreground;
+                opacity: 0.6;
+                overflow: elide;
+            }
+        }
+    }
+}

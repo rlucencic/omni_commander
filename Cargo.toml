@@ -1,0 +1,43 @@
+[workspace]
+resolver = "3"
+members = ["crates/omni-vfs", "crates/omni-core", "crates/omni-ui-slint"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+publish = false
+
+[workspace.dependencies]
+omni-vfs = { path = "crates/omni-vfs" }
+omni-core = { path = "crates/omni-core" }
+
+anyhow = "1.0.104"
+jiff = "0.2.45"
+slint = { version = "1.18.1", default-features = false, features = [
+    "std",
+    "backend-winit",
+    "renderer-femtovg",
+    "renderer-femtovg-wgpu",
+    "renderer-software",
+    "accessibility",
+    "compat-1-2",
+] }
+slint-build = "1.18.1"
+tempfile = "3.27.0"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", default-features = false }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.dev.package."*"]
+# Dependencies (Slint, FemtoVG, ...) are much faster with optimizations even
+# in debug builds; our own crates stay unoptimized for fast iteration.
+opt-level = 2

@@ -1,0 +1,59 @@
+# Roadmap
+
+## Milestone 1: functional foundation ✅
+
+- [x] Cargo workspace (`omni-vfs`, `omni-core`, `omni-ui-slint`)
+- [x] Slint main window with two independent file panes
+- [x] Asynchronous, cancellable local directory enumeration with backpressure
+- [x] Metadata display: size, modification time, permissions / attributes, link targets
+- [x] Directory navigation (enter, parent, `..` row) with cursor restoration
+- [x] Keyboard navigation through a toolkit-independent keymap
+- [x] Active-pane switching (Tab, mouse)
+- [x] Sorting by name / extension / size / date, directories first, natural order
+- [x] Error reporting in the pane and through `tracing` logs
+- [x] GPU rendering via FemtoVG on wgpu/Vulkan, with automatic software fallback
+  (works around an invisible-cursor bug in NVIDIA's OpenGL driver)
+- [x] Unit and integration tests for the core (57 tests), no GUI required
+
+### Known limitations of Milestone 1
+
+- Opening files (Enter on a file) only shows a notice; launching files with their
+  associated applications needs platform integration (Milestone 2/3).
+- No automatic refresh when the directory changes on disk; use Ctrl+R. (Planned:
+  `notify`-based watching.)
+- No free-space information in the status bar yet.
+- Column widths are fixed; narrow panes hide the date and attribute columns.
+- Name sorting is locale-independent (natural, case-insensitive), without full
+  Unicode collation.
+- With non-Latin keyboard layouts, Ctrl+letter shortcuts follow the layout's character,
+  not the physical key.
+- All metadata is read eagerly during enumeration. That is fast locally, but slow network
+  mounts would benefit from lazy metadata.
+- Sorting runs inside the app actor. 100 000 entries take tens of milliseconds in release
+  builds; for millions of entries it should move to a blocking task.
+- The renderer can only be chosen with `SLINT_BACKEND`; a renderer setting belongs in
+  the Milestone 2 settings. Slint does not report which renderer it fell back to.
+- Only Linux (X11) has been run. The code has `cfg` paths for Windows and macOS, but
+  they have not been compiled for those targets yet.
+
+## Milestone 2: navigation and usability
+
+Tabs, navigation history (Alt+Left/Right), breadcrumbs, editable location (Ctrl+L),
+multi-selection (Insert/Space/Ctrl+A), quick filter, persistent settings (TOML), user
+keymaps, explicit light/dark theme (`Palette.color-scheme`), filesystem watching.
+
+## Milestone 3: file operations
+
+`omni-operations` crate: copy, move (copy + verify + delete across filesystems), rename,
+delete and trash, create directory, conflict policies, progress, background queue,
+cancellation.
+
+## Milestone 4: advanced features
+
+Miller columns, thumbnails, previews, archive browsing, search, batch rename,
+directory comparison.
+
+## Milestone 5: cross-platform release
+
+Windows and macOS builds and installers, Linux DEB/AppImage, platform integration
+tests, high-DPI and drag-and-drop verification, release automation.
