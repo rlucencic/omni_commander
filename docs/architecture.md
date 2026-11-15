@@ -91,6 +91,23 @@ quotes, `~`, relative paths, and lexical `..` handling like a shell's `cd`. The 
 not check in advance whether the target is a file. If listing fails with "not a directory",
 it shows the parent with the file under the cursor. Breadcrumbs come from the same module.
 
+### Tabs
+
+Each pane is a `Side` holding a list of tabs. Each tab is a full `PaneState` with its own
+history, selection and filter, plus a stable `TabId` and its loader task.
+
+- **Routing.** Directory events carry the `TabId`, not a position, so closing or
+  reordering tabs can never send results to the wrong tab. Events of a closed tab are
+  dropped, and dropping a `Tab` aborts its loader.
+- **What is published.** Commands addressed to a pane act on its active tab, and only
+  the active tab is published. Activating a tab publishes its complete state again
+  (listing, cursor, selection, status). Background tabs keep loading silently; only
+  their titles reach the tab bar (`Update::Tabs`, sent when it changes).
+- **New tabs.** `Ctrl+T` duplicates the active tab: the copy shares the loaded listing,
+  so it appears at once, and refreshes in the background.
+- **Tab bar.** Shown only with two or more tabs. Tabs are placed with computed geometry
+  (like the columns), so many tabs are clipped rather than widening the pane.
+
 ### Selection and quick filter
 
 Both live in `PaneState`, so they are testable without a GUI and available to the file

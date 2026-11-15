@@ -48,14 +48,19 @@ Delivered in slices, each tested before the next:
    - [x] Multi-selection: Insert, Space, Shift+arrows, Ctrl+A, Ctrl/Shift+click
    - [x] Selection summary in the status line
    - [x] Quick filter: type to filter, wildcards, `;` alternatives
-3. Tabs
-   - [ ] Per-pane tabs: Ctrl+T, Ctrl+W, Ctrl+Tab, tab bar
+3. Tabs ✅
+   - [x] Per-pane tabs with their own history, selection and filter
+   - [x] Ctrl+T, Ctrl+W, Ctrl+Tab, Ctrl+↑, middle-click, tab bar with close buttons
 4. Settings
    - [ ] `omni-config` crate: TOML settings in the platform config directory
    - [ ] Restore folders/tabs and sort order on start
    - [ ] Configurable shortcuts
    - [ ] Light/dark/system theme, renderer choice, hidden-file toggle
    - [ ] Automatic refresh with `notify`
+
+Known limitations of slice 3: tabs cannot be reordered or dragged to the other pane yet,
+and when there are too many to fit at the minimum width the rest are cut off (no scrolling
+or overflow menu). Tabs are not saved yet; that comes with settings in slice 4.
 
 Known limitations of slice 2: changing the filter deselects entries it hides, and they
 stay deselected when the filter is removed (deliberate: no invisible selection). There is

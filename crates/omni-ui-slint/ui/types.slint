@@ -25,6 +25,9 @@ export struct PaneInfo {
     crumbs: [string],
     can-go-back: bool,
     can-go-forward: bool,
+    /// Tab titles; the tab bar is shown when there is more than one.
+    tabs: [string],
+    active-tab: int,
     /// Counts of the shown rows (and how many a filter hides).
     summary: string,
     /// What is selected; empty when nothing is.

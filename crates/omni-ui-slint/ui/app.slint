@@ -41,6 +41,9 @@ export component AppWindow inherits Window {
     callback go-forward(pane: int);
     callback go-up(pane: int);
     callback row-pressed(pane: int, row: int, control: bool, shift: bool);
+    callback tab-selected(pane: int, index: int);
+    callback tab-closed(pane: int, index: int);
+    callback open-in-new-tab(pane: int, row: int);
     callback filter-edited(pane: int, text: string);
 
     /// Opens the quick filter of a pane, appending `typed`.
@@ -139,6 +142,15 @@ export component AppWindow inherits Window {
                     filter-edited(text) => {
                         root.filter-edited(0, text);
                     }
+                    tab-selected(index) => {
+                        root.tab-selected(0, index);
+                    }
+                    tab-closed(index) => {
+                        root.tab-closed(0, index);
+                    }
+                    open-in-new-tab(row) => {
+                        root.open-in-new-tab(0, row);
+                    }
                 }
 
                 right := FilePane {
@@ -182,11 +194,20 @@ export component AppWindow inherits Window {
                     filter-edited(text) => {
                         root.filter-edited(1, text);
                     }
+                    tab-selected(index) => {
+                        root.tab-selected(1, index);
+                    }
+                    tab-closed(index) => {
+                        root.tab-closed(1, index);
+                    }
+                    open-in-new-tab(row) => {
+                        root.open-in-new-tab(1, row);
+                    }
                 }
             }
 
             Text {
-                text: "Ins/Space select   Shift+↑↓ range   Ctrl+A all   type to filter   Alt+←/→ back/forward   Ctrl+L path   Tab pane   Ctrl+R refresh   Ctrl+F3–F6 sort";
+                text: "Ins/Space select   Shift+↑↓ range   Ctrl+A all   type to filter   Ctrl+T/W tabs   Ctrl+Tab next tab   Alt+←/→ back/forward   Ctrl+L path   Tab pane   Ctrl+R refresh";
                 font-size: 11px;
                 color: Palette.foreground;
                 opacity: 0.6;

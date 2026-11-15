@@ -19,6 +19,8 @@ struct Harness {
     handle: AppHandle,
     updates: mpsc::Receiver<Update>,
     task: tokio::task::JoinHandle<()>,
+    /// Latest tab bar of each pane, recorded from every update read.
+    tabs: HashMap<PaneId, (Vec<String>, usize)>,
 }
 
 fn start(fs: Arc<dyn FileSystem>, left: &Path, right: &Path) -> Harness {
@@ -38,6 +40,7 @@ fn start(fs: Arc<dyn FileSystem>, left: &Path, right: &Path) -> Harness {
         handle,
         updates,
         task,
+        tabs: HashMap::new(),
     }
 }
 
@@ -49,10 +52,19 @@ struct ListingUpdate {
 
 impl Harness {
     async fn next(&mut self) -> Update {
-        tokio::time::timeout(TIMEOUT, self.updates.recv())
+        let update = tokio::time::timeout(TIMEOUT, self.updates.recv())
             .await
             .expect("timed out waiting for an update")
-            .expect("core stopped")
+            .expect("core stopped");
+        if let Update::Tabs {
+            pane,
+            titles,
+            active,
+        } = &update
+        {
+            self.tabs.insert(*pane, (titles.clone(), *active));
+        }
+        update
     }
 
     /// Waits for the next completed listing of `pane` (skipping partial ones).
@@ -80,6 +92,13 @@ impl Harness {
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// Waits until the tab bar of `pane` is `expected` (it may already be).
+    async fn expect_tabs(&mut self, pane: PaneId, expected: (Vec<String>, usize)) {
+        while self.tabs.get(&pane) != Some(&expected) {
+            self.next().await;
         }
     }
 
@@ -278,6 +297,94 @@ async fn selection_and_filter_round_trip() {
                 "a.txt is hidden, so it was deselected"
             );
             break;
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tabs_open_switch_and_close() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("a")).unwrap();
+    std::fs::create_dir(dir.path().join("b")).unwrap();
+    let root = dir
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let titles = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+
+    let mut h = start(Arc::new(LocalFs), dir.path(), dir.path());
+    let _ = h.listing(PaneId::Left).await;
+
+    // A new tab shows the same place and becomes active.
+    h.handle.send(Command::NewTab { pane: PaneId::Left });
+    h.expect_tabs(PaneId::Left, (titles(&[&root, &root]), 1))
+        .await;
+
+    // Navigating in it renames it; the first tab is untouched.
+    h.handle.send(Command::Navigate {
+        pane: PaneId::Left,
+        path: dir.path().join("a"),
+    });
+    assert_eq!(h.listing(PaneId::Left).await.location, dir.path().join("a"));
+    h.expect_tabs(PaneId::Left, (titles(&[&root, "a"]), 1))
+        .await;
+
+    h.handle.send(Command::SelectTab {
+        pane: PaneId::Left,
+        index: 0,
+    });
+    let first = h.listing(PaneId::Left).await;
+    assert_eq!(first.location, dir.path());
+    h.expect_tabs(PaneId::Left, (titles(&[&root, "a"]), 0))
+        .await;
+
+    // "b" (row 2) opens in a background tab right after the active one.
+    h.handle.send(Command::OpenInNewTab {
+        pane: PaneId::Left,
+        snapshot: first.listing.id(),
+        row: 2,
+        background: true,
+    });
+    h.expect_tabs(PaneId::Left, (titles(&[&root, "b", "a"]), 0))
+        .await;
+
+    h.handle.send(Command::CycleTab {
+        pane: PaneId::Left,
+        forward: true,
+    });
+    assert_eq!(h.listing(PaneId::Left).await.location, dir.path().join("b"));
+    h.expect_tabs(PaneId::Left, (titles(&[&root, "b", "a"]), 1))
+        .await;
+
+    // Closing the active tab activates its right neighbour.
+    h.handle.send(Command::CloseTab {
+        pane: PaneId::Left,
+        index: None,
+    });
+    assert_eq!(h.listing(PaneId::Left).await.location, dir.path().join("a"));
+    h.expect_tabs(PaneId::Left, (titles(&[&root, "a"]), 1))
+        .await;
+
+    // Closing a tab to the left keeps the active one; the last tab stays.
+    h.handle.send(Command::CloseTab {
+        pane: PaneId::Left,
+        index: Some(0),
+    });
+    h.expect_tabs(PaneId::Left, (titles(&["a"]), 0)).await;
+    h.handle.send(Command::CloseTab {
+        pane: PaneId::Left,
+        index: None,
+    });
+    h.handle.send(Command::SwitchPane);
+    loop {
+        match h.next().await {
+            Update::ActivePane(PaneId::Right) => break,
+            Update::Tabs {
+                pane: PaneId::Left, ..
+            } => panic!("the last tab must not close"),
+            _ => {}
         }
     }
 }

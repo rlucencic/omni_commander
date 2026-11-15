@@ -130,6 +130,13 @@ pub enum Action {
     EditLocation,
     /// Make the other pane active.
     SwitchPane,
+    /// Open a new tab with the current location.
+    NewTab,
+    /// Open the directory under the cursor in a new tab.
+    OpenInNewTab,
+    CloseTab,
+    NextTab,
+    PreviousTab,
     /// Re-read the active pane's directory.
     Refresh,
     /// Sort the active pane by a column (again: reverse direction).
@@ -194,6 +201,21 @@ impl Keymap {
             DeselectAll,
         );
         map.bind(KeyChord::ctrl(Key::Char('f')), Filter);
+        map.bind(KeyChord::ctrl(Key::Char('t')), NewTab);
+        map.bind(KeyChord::ctrl(Key::Up), OpenInNewTab);
+        map.bind(KeyChord::ctrl(Key::Char('w')), CloseTab);
+        map.bind(KeyChord::ctrl(Key::Tab), NextTab);
+        map.bind(
+            KeyChord {
+                key: Key::Tab,
+                mods: Modifiers {
+                    ctrl: true,
+                    shift: true,
+                    ..Modifiers::default()
+                },
+            },
+            PreviousTab,
+        );
         map.bind(KeyChord::shift(Key::Tab), SwitchPane);
         map.bind(KeyChord::ctrl(Key::PageUp), GoUp);
         map.bind(KeyChord::ctrl(Key::Char('r')), Refresh);
@@ -279,6 +301,38 @@ mod tests {
             },
         };
         assert_eq!(map.lookup(ctrl_shift_a), Some(Action::DeselectAll));
+    }
+
+    #[test]
+    fn tab_bindings() {
+        let map = Keymap::commander_defaults();
+        assert_eq!(
+            map.lookup(KeyChord::ctrl(Key::Char('t'))),
+            Some(Action::NewTab)
+        );
+        assert_eq!(
+            map.lookup(KeyChord::ctrl(Key::Char('w'))),
+            Some(Action::CloseTab)
+        );
+        assert_eq!(map.lookup(KeyChord::ctrl(Key::Tab)), Some(Action::NextTab));
+        assert_eq!(
+            map.lookup(KeyChord::ctrl(Key::Up)),
+            Some(Action::OpenInNewTab)
+        );
+        let ctrl_shift_tab = KeyChord {
+            key: Key::Tab,
+            mods: Modifiers {
+                ctrl: true,
+                shift: true,
+                ..Modifiers::default()
+            },
+        };
+        assert_eq!(map.lookup(ctrl_shift_tab), Some(Action::PreviousTab));
+        // Plain Tab still switches panes.
+        assert_eq!(
+            map.lookup(KeyChord::plain(Key::Tab)),
+            Some(Action::SwitchPane)
+        );
     }
 
     #[test]

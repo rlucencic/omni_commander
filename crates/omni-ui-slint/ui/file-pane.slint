@@ -191,6 +191,7 @@ component FileRowView inherits Rectangle {
     callback history-button(forward: bool);
     /// The left button went down, with these modifiers.
     callback pressed(control: bool, shift: bool);
+    callback middle-pressed;
 
     property <bool> highlighted: root.current && root.pane-active;
     property <color> marked-color: Palette.color-scheme == ColorScheme.dark ? #ff9e64 : #c2410c;
@@ -214,6 +215,8 @@ component FileRowView inherits Rectangle {
             if event.kind == PointerEventKind.down {
                 if event.button == PointerEventButton.left {
                     root.pressed(event.modifiers.control, event.modifiers.shift);
+                } else if event.button == PointerEventButton.middle {
+                    root.middle-pressed();
                 } else if event.button == PointerEventButton.back {
                     root.history-button(false);
                 } else if event.button == PointerEventButton.forward {
@@ -279,6 +282,84 @@ component FileRowView inherits Rectangle {
         text: root.data.attributes;
         foreground: root.text-color;
         font-family: "monospace";
+    }
+}
+
+// One tab: click selects, middle-click or × closes.
+component TabButton inherits Rectangle {
+    in property <string> title;
+    /// The active tab of its pane.
+    in property <bool> current;
+    in property <bool> pane-active;
+    callback select;
+    callback close;
+
+    background: root.current ? Palette.background : (touch.has-hover ? Palette.control-background : Palette.alternate-background);
+
+    touch := TouchArea {
+        clicked => {
+            root.select();
+        }
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.down && event.button == PointerEventButton.middle {
+                root.close();
+            }
+        }
+    }
+
+    if root.current: Rectangle {
+        y: 0px;
+        height: 2px;
+        background: root.pane-active ? Palette.accent-background : Palette.border;
+    }
+
+    Text {
+        x: 10px;
+        width: max(0px, parent.width - 34px);
+        height: parent.height;
+        text: root.title;
+        overflow: elide;
+        vertical-alignment: center;
+        color: Palette.foreground;
+        opacity: root.current ? 1.0 : 0.75;
+        font-weight: root.current ? 600 : 400;
+    }
+
+    close-button := TouchArea {
+        x: parent.width - 22px;
+        y: (parent.height - 16px) / 2;
+        width: 16px;
+        height: 16px;
+        clicked => {
+            root.close();
+        }
+    }
+
+    Rectangle {
+        x: close-button.x;
+        y: close-button.y;
+        width: close-button.width;
+        height: close-button.height;
+        border-radius: 3px;
+        background: close-button.has-hover ? Palette.foreground.transparentize(0.85) : transparent;
+        Path {
+            width: 16px;
+            height: 16px;
+            viewbox-width: 16;
+            viewbox-height: 16;
+            commands: "M5 5 L11 11 M11 5 L5 11";
+            stroke: Palette.foreground;
+            stroke-width: 1.2px;
+            opacity: root.current || touch.has-hover || close-button.has-hover ? 0.8 : 0.0;
+        }
+    }
+
+    // Separator to the next tab.
+    Rectangle {
+        x: parent.width - 1px;
+        width: 1px;
+        height: parent.height;
+        background: Palette.border;
     }
 }
 
@@ -547,6 +628,15 @@ export component FilePane inherits Rectangle {
     callback row-pressed(row: int, control: bool, shift: bool);
     /// The quick filter text was edited.
     callback filter-edited(text: string);
+    callback tab-selected(index: int);
+    callback tab-closed(index: int);
+    /// Middle-click on a row: open it in a background tab.
+    callback open-in-new-tab(row: int);
+
+    property <int> tab-count: root.info.tabs.length;
+    // Tabs share the width (between 56 and 200 px each); like the columns,
+    // they are placed explicitly so many tabs cannot widen the pane.
+    property <length> tab-width: max(56px, min(200px, (root.width - 2px) / max(1, root.tab-count)));
 
     /// True while the filter editor has keyboard focus.
     out property <bool> filtering: false;
@@ -640,6 +730,29 @@ export component FilePane inherits Rectangle {
 
     VerticalLayout {
         padding: 1px;
+
+        if root.tab-count > 1: Rectangle {
+            height: 28px;
+            background: Palette.alternate-background;
+            clip: true;
+
+            for title[index] in root.info.tabs: TabButton {
+                x: index * root.tab-width;
+                width: root.tab-width;
+                height: parent.height;
+                title: title;
+                current: index == root.info.active-tab;
+                pane-active: root.active;
+                select => {
+                    root.clicked();
+                    root.tab-selected(index);
+                }
+                close => {
+                    root.clicked();
+                    root.tab-closed(index);
+                }
+            }
+        }
 
         location := LocationBar {
             info: root.info;
@@ -748,6 +861,10 @@ export component FilePane inherits Rectangle {
                 pressed(control, shift) => {
                     root.row-pressed(index, control, shift);
                 }
+                middle-pressed => {
+                    root.clicked();
+                    root.open-in-new-tab(index);
+                }
                 history-button(forward) => {
                     root.clicked();
                     if forward {
@@ -777,8 +894,32 @@ export component FilePane inherits Rectangle {
                     opacity: 0.8;
                 }
 
-                FocusScope {
+                Rectangle {
                     horizontal-stretch: 1;
+
+                // Not editing: show the active filter (it belongs to the
+                // shown tab); a click edits it.
+                Text {
+                    visible: !root.filtering;
+                    width: parent.width;
+                    height: parent.height;
+                    text: root.info.filter;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    color: Palette.foreground;
+                }
+                TouchArea {
+                    visible: !root.filtering;
+                    clicked => {
+                        root.clicked();
+                        root.start-filter("");
+                    }
+                }
+
+                FocusScope {
+                    visible: root.filtering;
+                    width: parent.width;
+                    height: parent.height;
                     // While typing, Up/Down/PgUp/PgDn move through the
                     // matches; other unused keys must not reach the list's
                     // shortcuts.
@@ -823,6 +964,27 @@ export component FilePane inherits Rectangle {
                                 root.stop-filtering();
                             }
                         }
+                    }
+                }
+                }
+
+                // Clear button for an active filter.
+                if !root.filtering && root.info.filter != "": TouchArea {
+                    width: 22px;
+                    clicked => {
+                        root.filter-edited("");
+                    }
+                    Path {
+                        x: (parent.width - 16px) / 2;
+                        y: (parent.height - 16px) / 2;
+                        width: 16px;
+                        height: 16px;
+                        viewbox-width: 16;
+                        viewbox-height: 16;
+                        commands: "M5 5 L11 11 M11 5 L5 11";
+                        stroke: Palette.foreground;
+                        stroke-width: 1.2px;
+                        opacity: parent.has-hover ? 1.0 : 0.6;
                     }
                 }
             }

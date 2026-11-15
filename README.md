@@ -5,8 +5,8 @@ user interface. It aims to combine the power-user file management of Total Comma
 Double Commander with modern navigation and presentation.
 
 > **Status:** Milestone 2 in progress. You can browse local directories in two independent
-> panes with history, breadcrumbs, an editable location, multi-selection and a quick
-> filter. File operations are not
+> panes with tabs, history, breadcrumbs, an editable location, multi-selection and a
+> quick filter. File operations are not
 > implemented yet; see [docs/roadmap.md](docs/roadmap.md).
 
 ## Features
@@ -22,6 +22,7 @@ Double Commander with modern navigation and presentation.
 - Back/forward history per pane that restores the cursor, clickable breadcrumbs, and
   an editable location: `~`, relative paths and `..` work, and a file path opens its
   folder with the file selected
+- Tabs in each pane, each with its own location, history, selection and filter
 - Multi-selection by keyboard and mouse, with a summary of what is selected
 - Quick filter: start typing, or use wildcards and alternatives (`*.jpg;*.png`)
 - Keyboard-driven navigation through a toolkit-independent keymap
@@ -45,6 +46,10 @@ Double Commander with modern navigation and presentation.
 | Type any letter, or Ctrl+F | Quick filter (↑ ↓ move, Enter open, Tab back to the list, Esc clear) |
 | Esc (in the list) | Clear the quick filter |
 | Tab, Shift+Tab | Switch the active pane |
+| Ctrl+T | New tab with the current folder |
+| Ctrl+↑, middle-click a folder | Open the folder in a new tab (middle-click: in the background) |
+| Ctrl+W, middle-click a tab, × on a tab | Close the tab (the last tab stays) |
+| Ctrl+Tab / Ctrl+Shift+Tab, click a tab | Next / previous / chosen tab |
 | Ctrl+R | Re-read the active pane |
 | Ctrl+F3 / F4 / F5 / F6 | Sort by name / extension / date / size (again: reverse) |
 | Click a column header | Sort by that column |

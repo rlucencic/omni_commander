@@ -5,6 +5,11 @@
 //! is no shared mutable state and no locking; filesystem work happens on
 //! background tasks whose results come back as messages.
 //!
+//! Each of the two panes holds one or more tabs. Commands addressed to a pane
+//! act on its active tab, and updates describe the active tab only: when the
+//! active tab changes, its complete state is published again. Background tabs
+//! keep loading, but stay invisible until activated.
+//!
 //! ```text
 //!  UI thread ──Command──▶ actor ──read_dir──▶ provider (blocking pool)
 //!      ▲                    │  ◀──DirEvent───┘
@@ -56,7 +61,8 @@ impl PaneId {
 }
 
 /// A request from the front end. Commands that refer to a row carry the
-/// [`SnapshotId`] of the listing the row was taken from.
+/// [`SnapshotId`] of the listing the row was taken from. Commands addressed
+/// to a pane act on its active tab.
 #[derive(Debug, Clone)]
 pub enum Command {
     /// Enter the directory at `row`, or go up for the `..` row.
@@ -123,13 +129,41 @@ pub enum Command {
         pane: PaneId,
         text: String,
     },
+    /// Open a new tab next to the active one, showing the same location.
+    NewTab {
+        pane: PaneId,
+    },
+    /// Open the directory at `row` (or the parent for `..`) in a new tab;
+    /// in the `background` unless the new tab should become active.
+    OpenInNewTab {
+        pane: PaneId,
+        snapshot: SnapshotId,
+        row: usize,
+        background: bool,
+    },
+    /// Close tab `index` (the active tab if `None`). The last tab of a pane
+    /// is never closed.
+    CloseTab {
+        pane: PaneId,
+        index: Option<usize>,
+    },
+    SelectTab {
+        pane: PaneId,
+        index: usize,
+    },
+    /// Activate the next (or previous) tab, wrapping around.
+    CycleTab {
+        pane: PaneId,
+        forward: bool,
+    },
     /// Make `pane` the active pane.
     Activate(PaneId),
     /// Make the other pane active.
     SwitchPane,
 }
 
-/// A change the front end must display.
+/// A change the front end must display. Apart from [`Update::Tabs`], updates
+/// describe the active tab of `pane`.
 #[derive(Debug, Clone)]
 pub enum Update {
     /// New listing for a pane; place the cursor on `cursor`.
@@ -152,6 +186,12 @@ pub enum Update {
     /// Loading progress, status message, selection summary or filter of a
     /// pane changed.
     Status { pane: PaneId, status: PaneStatus },
+    /// The tabs of a pane: their titles in order, and which one is active.
+    Tabs {
+        pane: PaneId,
+        titles: Vec<String>,
+        active: usize,
+    },
     /// The active pane changed.
     ActivePane(PaneId),
 }
@@ -207,10 +247,14 @@ pub fn spawn(
     )
 }
 
-/// Directory event tagged with the pane and load it belongs to.
+/// Identifies a tab for its whole lifetime, independent of its position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct TabId(u64);
+
+/// Directory event tagged with the tab and load it belongs to.
 #[derive(Debug)]
-struct PaneDirEvent {
-    pane: PaneId,
+struct TabDirEvent {
+    tab: TabId,
     token: LoadToken,
     event: DirEvent,
 }
@@ -219,14 +263,41 @@ struct PaneDirEvent {
 #[derive(Debug)]
 struct Disconnected;
 
+struct Tab {
+    id: TabId,
+    state: PaneState,
+    /// Task forwarding the tab's current enumeration. Replacing or dropping
+    /// it aborts the task, which drops the stream and cancels the provider.
+    loader: Option<JoinHandle<()>>,
+}
+
+impl Drop for Tab {
+    fn drop(&mut self) {
+        if let Some(loader) = self.loader.take() {
+            loader.abort();
+        }
+    }
+}
+
+struct Side {
+    tabs: Vec<Tab>,
+    active: usize,
+    /// The tab bar as last sent to the front end.
+    published_tabs: Option<(Vec<String>, usize)>,
+}
+
+impl Side {
+    fn active(&self) -> &PaneState {
+        &self.tabs[self.active].state
+    }
+}
+
 struct Core {
-    panes: [PaneState; 2],
+    sides: [Side; 2],
     active: PaneId,
+    next_tab: u64,
     updates: mpsc::Sender<Update>,
-    dir_events: mpsc::Sender<PaneDirEvent>,
-    /// Task forwarding the current enumeration of each pane. Replacing it
-    /// aborts the old task, which drops its stream and cancels the provider.
-    loaders: [Option<JoinHandle<()>>; 2],
+    dir_events: mpsc::Sender<TabDirEvent>,
 }
 
 async fn run(
@@ -237,18 +308,29 @@ async fn run(
     let (dir_event_tx, mut dir_events) = mpsc::channel(DIR_EVENT_CAPACITY);
     let (left, left_changes) = PaneState::new(config.left.fs, config.left.path, config.sort);
     let (right, right_changes) = PaneState::new(config.right.fs, config.right.path, config.sort);
+    let side = |id: u64, state: PaneState| Side {
+        tabs: vec![Tab {
+            id: TabId(id),
+            state,
+            loader: None,
+        }],
+        active: 0,
+        published_tabs: None,
+    };
     let mut core = Core {
-        panes: [left, right],
+        sides: [side(0, left), side(1, right)],
         active: PaneId::Left,
+        next_tab: 2,
         updates,
         dir_events: dir_event_tx,
-        loaders: [None, None],
     };
 
     let started = async {
         core.send(Update::ActivePane(core.active)).await?;
-        core.apply(PaneId::Left, left_changes).await?;
-        core.apply(PaneId::Right, right_changes).await
+        core.apply(PaneId::Left, 0, left_changes).await?;
+        core.apply(PaneId::Right, 0, right_changes).await?;
+        core.publish_tabs(PaneId::Left).await?;
+        core.publish_tabs(PaneId::Right).await
     };
     if started.await.is_ok() {
         loop {
@@ -267,66 +349,177 @@ async fn run(
             }
         }
     }
-    for loader in core.loaders.iter_mut().filter_map(Option::take) {
-        loader.abort();
-    }
+    // Dropping the tabs aborts their loaders.
+    drop(core);
     tracing::debug!("application core stopped");
 }
 
 impl Core {
     async fn handle_command(&mut self, command: Command) -> Result<(), Disconnected> {
         tracing::trace!(?command, "command");
-        let (pane, changes) = match command {
+        match command {
             Command::Open {
                 pane,
                 snapshot,
                 row,
-            } => (pane, self.pane(pane).open(snapshot, row)),
+            } => self.on_active(pane, |s| s.open(snapshot, row)).await,
             Command::CursorMoved {
                 pane,
                 snapshot,
                 row,
             } => {
-                self.pane(pane).cursor_moved(snapshot, row);
-                return Ok(());
+                self.on_active(pane, |s| {
+                    s.cursor_moved(snapshot, row);
+                    Changes::default()
+                })
+                .await
             }
-            Command::GoUp { pane } => (pane, self.pane(pane).go_up()),
-            Command::GoBack { pane } => (pane, self.pane(pane).go_back()),
-            Command::GoForward { pane } => (pane, self.pane(pane).go_forward()),
-            Command::Navigate { pane, path } => (pane, self.pane(pane).navigate(path)),
+            Command::GoUp { pane } => self.on_active(pane, PaneState::go_up).await,
+            Command::GoBack { pane } => self.on_active(pane, PaneState::go_back).await,
+            Command::GoForward { pane } => self.on_active(pane, PaneState::go_forward).await,
+            Command::Navigate { pane, path } => self.on_active(pane, |s| s.navigate(path)).await,
             Command::NavigateToInput { pane, input } => {
                 let home = std::env::home_dir();
-                (
-                    pane,
-                    self.pane(pane).navigate_to_input(&input, home.as_deref()),
-                )
+                self.on_active(pane, |s| s.navigate_to_input(&input, home.as_deref()))
+                    .await
             }
-            Command::Refresh { pane } => (pane, self.pane(pane).refresh()),
-            Command::SortBy { pane, key } => (pane, self.pane(pane).sort_by(key)),
+            Command::Refresh { pane } => self.on_active(pane, PaneState::refresh).await,
+            Command::SortBy { pane, key } => self.on_active(pane, |s| s.sort_by(key)).await,
             Command::ToggleSelection {
                 pane,
                 snapshot,
                 row,
-            } => (pane, self.pane(pane).toggle_selection(snapshot, row)),
+            } => {
+                self.on_active(pane, |s| s.toggle_selection(snapshot, row))
+                    .await
+            }
             Command::SelectRange {
                 pane,
                 snapshot,
                 anchor,
                 row,
-            } => (pane, self.pane(pane).select_range(snapshot, anchor, row)),
-            Command::SelectAll { pane } => (pane, self.pane(pane).select_all()),
-            Command::DeselectAll { pane } => (pane, self.pane(pane).deselect_all()),
-            Command::SetFilter { pane, text } => (pane, self.pane(pane).set_filter(&text)),
-            Command::Activate(pane) => return self.set_active(pane).await,
-            Command::SwitchPane => return self.set_active(self.active.other()).await,
-        };
-        self.apply(pane, changes).await
+            } => {
+                self.on_active(pane, |s| s.select_range(snapshot, anchor, row))
+                    .await
+            }
+            Command::SelectAll { pane } => self.on_active(pane, PaneState::select_all).await,
+            Command::DeselectAll { pane } => self.on_active(pane, PaneState::deselect_all).await,
+            Command::SetFilter { pane, text } => {
+                self.on_active(pane, |s| s.set_filter(&text)).await
+            }
+            Command::NewTab { pane } => {
+                let (state, changes) = self.sides[pane.index()].active().duplicate();
+                self.insert_tab(pane, state, changes, true).await
+            }
+            Command::OpenInNewTab {
+                pane,
+                snapshot,
+                row,
+                background,
+            } => {
+                let side = &self.sides[pane.index()];
+                let Some(path) = side.active().directory_at(snapshot, row) else {
+                    return Ok(());
+                };
+                let current = side.active();
+                let (state, changes) =
+                    PaneState::new(Arc::clone(current.fs()), path, current.sort());
+                self.insert_tab(pane, state, changes, !background).await
+            }
+            Command::CloseTab { pane, index } => self.close_tab(pane, index).await,
+            Command::SelectTab { pane, index } => self.select_tab(pane, index).await,
+            Command::CycleTab { pane, forward } => {
+                let side = &self.sides[pane.index()];
+                let count = side.tabs.len();
+                let index = if forward {
+                    (side.active + 1) % count
+                } else {
+                    (side.active + count - 1) % count
+                };
+                self.select_tab(pane, index).await
+            }
+            Command::Activate(pane) => self.set_active(pane).await,
+            Command::SwitchPane => self.set_active(self.active.other()).await,
+        }
     }
 
-    async fn handle_dir_event(&mut self, event: PaneDirEvent) -> Result<(), Disconnected> {
-        let PaneDirEvent { pane, token, event } = event;
-        let changes = self.pane(pane).on_dir_event(token, event, Instant::now());
-        self.apply(pane, changes).await
+    async fn handle_dir_event(&mut self, event: TabDirEvent) -> Result<(), Disconnected> {
+        let TabDirEvent { tab, token, event } = event;
+        let Some((pane, index)) = self.find_tab(tab) else {
+            return Ok(()); // the tab was closed
+        };
+        let changes =
+            self.sides[pane.index()].tabs[index]
+                .state
+                .on_dir_event(token, event, Instant::now());
+        self.apply(pane, index, changes).await
+    }
+
+    /// Runs `f` on the active tab of `pane` and carries out its changes.
+    async fn on_active(
+        &mut self,
+        pane: PaneId,
+        f: impl FnOnce(&mut PaneState) -> Changes,
+    ) -> Result<(), Disconnected> {
+        let side = &mut self.sides[pane.index()];
+        let index = side.active;
+        let changes = f(&mut side.tabs[index].state);
+        self.apply(pane, index, changes).await
+    }
+
+    async fn insert_tab(
+        &mut self,
+        pane: PaneId,
+        state: PaneState,
+        changes: Changes,
+        activate: bool,
+    ) -> Result<(), Disconnected> {
+        let id = TabId(self.next_tab);
+        self.next_tab += 1;
+        let side = &mut self.sides[pane.index()];
+        let index = side.active + 1;
+        side.tabs.insert(
+            index,
+            Tab {
+                id,
+                state,
+                loader: None,
+            },
+        );
+        if activate {
+            side.active = index;
+            self.publish_active_tab(pane).await?;
+        }
+        self.apply(pane, index, changes).await?;
+        self.publish_tabs(pane).await
+    }
+
+    async fn close_tab(&mut self, pane: PaneId, index: Option<usize>) -> Result<(), Disconnected> {
+        let side = &mut self.sides[pane.index()];
+        let index = index.unwrap_or(side.active);
+        if side.tabs.len() <= 1 || index >= side.tabs.len() {
+            return Ok(());
+        }
+        side.tabs.remove(index);
+        let was_active = index == side.active;
+        if index < side.active || side.active == side.tabs.len() {
+            side.active -= 1;
+        }
+        if was_active {
+            // The neighbour to the right (or the new last tab) takes over.
+            self.publish_active_tab(pane).await?;
+        }
+        self.publish_tabs(pane).await
+    }
+
+    async fn select_tab(&mut self, pane: PaneId, index: usize) -> Result<(), Disconnected> {
+        let side = &mut self.sides[pane.index()];
+        if index >= side.tabs.len() || index == side.active {
+            return Ok(());
+        }
+        side.active = index;
+        self.publish_active_tab(pane).await?;
+        self.publish_tabs(pane).await
     }
 
     async fn set_active(&mut self, pane: PaneId) -> Result<(), Disconnected> {
@@ -337,51 +530,112 @@ impl Core {
         self.send(Update::ActivePane(pane)).await
     }
 
-    fn pane(&mut self, pane: PaneId) -> &mut PaneState {
-        &mut self.panes[pane.index()]
+    fn find_tab(&self, id: TabId) -> Option<(PaneId, usize)> {
+        PaneId::ALL.into_iter().find_map(|pane| {
+            self.sides[pane.index()]
+                .tabs
+                .iter()
+                .position(|tab| tab.id == id)
+                .map(|index| (pane, index))
+        })
     }
 
-    /// Carries out what a pane state transition asked for.
-    async fn apply(&mut self, pane: PaneId, changes: Changes) -> Result<(), Disconnected> {
+    /// Carries out what a state transition of tab `index` asked for. Only the
+    /// active tab is published; a background tab may change its title.
+    async fn apply(
+        &mut self,
+        pane: PaneId,
+        index: usize,
+        changes: Changes,
+    ) -> Result<(), Disconnected> {
         if let Some(request) = changes.load {
-            self.start_load(pane, request);
+            self.start_load(pane, index, request);
         }
-        let state = &self.panes[pane.index()];
-        if let Some(cursor) = changes.listing {
-            let update = Update::Listing {
-                pane,
-                location: state.location().to_path_buf(),
-                listing: Arc::clone(state.listing()),
-                sort: state.sort(),
-                cursor,
-                selection: Arc::clone(state.selection()),
-            };
-            self.send(update).await?;
-        } else if let Some(change) = changes.selection {
-            let update = Update::Selection {
-                pane,
-                snapshot: state.listing().id(),
-                selection: Arc::clone(state.selection()),
-                change,
-            };
-            self.send(update).await?;
+        let side = &self.sides[pane.index()];
+        if index == side.active {
+            let state = side.active();
+            if let Some(cursor) = changes.listing {
+                let update = Update::Listing {
+                    pane,
+                    location: state.location().to_path_buf(),
+                    listing: Arc::clone(state.listing()),
+                    sort: state.sort(),
+                    cursor,
+                    selection: Arc::clone(state.selection()),
+                };
+                self.send(update).await?;
+            } else if let Some(change) = changes.selection {
+                let update = Update::Selection {
+                    pane,
+                    snapshot: state.listing().id(),
+                    selection: Arc::clone(state.selection()),
+                    change,
+                };
+                self.send(update).await?;
+            }
+            if changes.status {
+                let status = self.sides[pane.index()].active().status();
+                self.send(Update::Status { pane, status }).await?;
+            }
         }
-        if changes.status {
-            let status = self.panes[pane.index()].status();
-            self.send(Update::Status { pane, status }).await?;
+        if changes.listing.is_some() {
+            self.publish_tabs(pane).await?;
         }
         Ok(())
     }
 
-    fn start_load(&mut self, pane: PaneId, request: LoadRequest) {
+    /// Publishes the complete state of the active tab of `pane`.
+    async fn publish_active_tab(&mut self, pane: PaneId) -> Result<(), Disconnected> {
+        let state = self.sides[pane.index()].active();
+        let listing = Update::Listing {
+            pane,
+            location: state.location().to_path_buf(),
+            listing: Arc::clone(state.listing()),
+            sort: state.sort(),
+            cursor: state.cursor(),
+            selection: Arc::clone(state.selection()),
+        };
+        let status = Update::Status {
+            pane,
+            status: state.status(),
+        };
+        self.send(listing).await?;
+        self.send(status).await
+    }
+
+    /// Sends the tab bar of `pane` if it differs from what was last sent.
+    async fn publish_tabs(&mut self, pane: PaneId) -> Result<(), Disconnected> {
+        let side = &mut self.sides[pane.index()];
+        let titles: Vec<String> = side.tabs.iter().map(|tab| tab.state.title()).collect();
+        let current = (titles, side.active);
+        if side.published_tabs.as_ref() == Some(&current) {
+            return Ok(());
+        }
+        side.published_tabs = Some(current.clone());
+        let (titles, active) = current;
+        self.send(Update::Tabs {
+            pane,
+            titles,
+            active,
+        })
+        .await
+    }
+
+    fn start_load(&mut self, pane: PaneId, index: usize, request: LoadRequest) {
         let LoadRequest { token, path } = request;
-        tracing::debug!(?pane, path = %path.display(), "loading directory");
-        let mut stream = self.panes[pane.index()].fs().read_dir(&path);
+        tracing::debug!(?pane, tab = index, path = %path.display(), "loading directory");
+        let tab = &mut self.sides[pane.index()].tabs[index];
+        let mut stream = tab.state.fs().read_dir(&path);
         let events = self.dir_events.clone();
+        let id = tab.id;
         let loader = tokio::spawn(async move {
             while let Some(event) = stream.next().await {
                 if events
-                    .send(PaneDirEvent { pane, token, event })
+                    .send(TabDirEvent {
+                        tab: id,
+                        token,
+                        event,
+                    })
                     .await
                     .is_err()
                 {
@@ -389,7 +643,7 @@ impl Core {
                 }
             }
         });
-        if let Some(previous) = self.loaders[pane.index()].replace(loader) {
+        if let Some(previous) = tab.loader.replace(loader) {
             previous.abort();
         }
     }

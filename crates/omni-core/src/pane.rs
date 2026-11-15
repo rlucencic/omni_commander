@@ -250,6 +250,31 @@ impl PaneState {
         (pane, changes)
     }
 
+    /// A new pane at the same location (e.g. for a new tab). It shares the
+    /// current listing, so it can be shown at once, and requests a refresh
+    /// to bring it up to date. History, selection and filter start empty.
+    pub fn duplicate(&self) -> (Self, Changes) {
+        let mut pane = Self {
+            fs: Arc::clone(&self.fs),
+            location: self.location.clone(),
+            full: Arc::clone(&self.full),
+            listing: Arc::clone(&self.full),
+            filter: None,
+            selection: Arc::new(Selection::new(self.full.entries().len())),
+            range: None,
+            sort: self.sort,
+            focus: self.focus.clone(),
+            load: None,
+            message: None,
+            settled: self.settled,
+            next_token: 0,
+            back: Vec::new(),
+            forward: Vec::new(),
+        };
+        let changes = pane.refresh();
+        (pane, changes)
+    }
+
     pub fn fs(&self) -> &Arc<dyn FileSystem> {
         &self.fs
     }
@@ -265,6 +290,35 @@ impl PaneState {
 
     pub fn sort(&self) -> SortSpec {
         self.sort
+    }
+
+    /// The row the cursor is on in [`Self::listing`].
+    pub fn cursor(&self) -> usize {
+        self.focus.resolve(&self.listing)
+    }
+
+    /// Short name for tabs: the last path component (or the root itself).
+    pub fn title(&self) -> String {
+        match self.location.file_name() {
+            Some(name) => name.to_string_lossy().into_owned(),
+            None => self.location.display().to_string(),
+        }
+    }
+
+    /// The directory that row `row` of listing `snapshot` leads to: a
+    /// directory entry, or the parent for `..`. `None` for files and for
+    /// outdated snapshots.
+    pub fn directory_at(&self, snapshot: SnapshotId, row: usize) -> Option<PathBuf> {
+        if snapshot != self.listing.id() {
+            return None;
+        }
+        match self.listing.row(row)? {
+            Row::Parent => self.location.parent().map(Path::to_path_buf),
+            Row::Entry(entry) if entry.is_dir_like() => {
+                child_path(&self.location, &entry.name).ok()
+            }
+            Row::Entry(_) => None,
+        }
     }
 
     /// Selected entries, by entry index of [`Self::listing`].
@@ -1420,5 +1474,33 @@ mod tests {
         assert!(pane.selection().is_empty());
         assert_eq!(pane.status().filter, "");
         assert_eq!(pane.listing().entry_count(), 2);
+    }
+
+    #[test]
+    fn duplicate_shares_the_listing_and_refreshes() {
+        let mut pane = loaded_pane(vec![dir("a"), file("b")]);
+        let _ = pane.navigate(home().join("x")); // pending load is not copied
+        let _ = pane.toggle_selection(pane.listing().id(), 2);
+        let (copy, changes) = pane.duplicate();
+        assert!(Arc::ptr_eq(copy.listing(), &pane.full));
+        assert_eq!(
+            changes.load.unwrap().path,
+            home(),
+            "refreshes its own location"
+        );
+        assert!(copy.selection().is_empty());
+        assert_eq!(copy.status().history, HistoryState::default());
+        assert_eq!(copy.title(), "user");
+    }
+
+    #[test]
+    fn directory_at_rows() {
+        let pane = loaded_pane(vec![dir("a"), file("b")]);
+        let id = pane.listing().id();
+        assert_eq!(pane.directory_at(id, 0), Some(root().join("home")));
+        assert_eq!(pane.directory_at(id, 1), Some(home().join("a")));
+        assert_eq!(pane.directory_at(id, 2), None, "files are not directories");
+        let (root_pane, _) = PaneState::new(Arc::new(UnusedFs), root(), SortSpec::default());
+        assert_eq!(root_pane.title(), root().display().to_string());
     }
 }

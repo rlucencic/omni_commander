@@ -135,6 +135,30 @@ impl Controller {
             c.row_pressed(pane_id(pane), to_row(row), control, shift);
         });
         let c = Rc::clone(&controller);
+        window.on_tab_selected(move |pane, index| {
+            c.app.send(Command::SelectTab {
+                pane: pane_id(pane),
+                index: to_row(index),
+            });
+        });
+        let c = Rc::clone(&controller);
+        window.on_tab_closed(move |pane, index| {
+            c.app.send(Command::CloseTab {
+                pane: pane_id(pane),
+                index: Some(to_row(index)),
+            });
+        });
+        let c = Rc::clone(&controller);
+        window.on_open_in_new_tab(move |pane, row| {
+            let pane = pane_id(pane);
+            c.app.send(Command::OpenInNewTab {
+                pane,
+                snapshot: c.rows(pane).snapshot(),
+                row: to_row(row),
+                background: true,
+            });
+        });
+        let c = Rc::clone(&controller);
         window.on_filter_edited(move |pane, text| {
             c.app.send(Command::SetFilter {
                 pane: pane_id(pane),
@@ -198,6 +222,17 @@ impl Controller {
             }
             Update::Status { pane, status } => {
                 self.edit_info(&window, pane, |info| apply_status(info, &status));
+            }
+            Update::Tabs {
+                pane,
+                titles,
+                active,
+            } => {
+                let titles: Vec<SharedString> = titles.iter().map(|t| t.as_str().into()).collect();
+                self.edit_info(&window, pane, |info| {
+                    info.tabs = ModelRc::new(VecModel::from(titles));
+                    info.active_tab = to_index(active);
+                });
             }
             Update::ActivePane(pane) => {
                 self.active.set(pane);
@@ -280,6 +315,22 @@ impl Controller {
             Action::GoForward => self.app.send(Command::GoForward { pane }),
             Action::EditLocation => window.invoke_edit_location(index),
             Action::SwitchPane => self.app.send(Command::SwitchPane),
+            Action::NewTab => self.app.send(Command::NewTab { pane }),
+            Action::OpenInNewTab => self.app.send(Command::OpenInNewTab {
+                pane,
+                snapshot: view.rows.snapshot(),
+                row: to_row(self.cursor(window, pane)),
+                background: false,
+            }),
+            Action::CloseTab => self.app.send(Command::CloseTab { pane, index: None }),
+            Action::NextTab => self.app.send(Command::CycleTab {
+                pane,
+                forward: true,
+            }),
+            Action::PreviousTab => self.app.send(Command::CycleTab {
+                pane,
+                forward: false,
+            }),
             Action::Refresh => self.app.send(Command::Refresh { pane }),
             Action::SortBy(key) => self.app.send(Command::SortBy { pane, key }),
         }
